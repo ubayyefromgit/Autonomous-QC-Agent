@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -15,11 +16,15 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB as PG_JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.infrastructure.database.session import Base
+
+JSONB = JSON().with_variant(PG_JSONB(), "postgresql")
+UUID = Uuid
 
 
 def utc_now() -> datetime:

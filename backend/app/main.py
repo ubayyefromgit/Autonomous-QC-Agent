@@ -66,29 +66,35 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
     app.include_router(api_v1_router, prefix=settings.API_V1_STR)
 
-    # Locate bundled or local compiled React frontend (frontend/dist)
-    candidates = [
-        Path(__file__).resolve().parents[2] / "frontend" / "dist",
-        Path.cwd() / "frontend" / "dist",
-    ]
-    if hasattr(sys, "_MEIPASS"):
-        candidates.insert(0, Path(sys._MEIPASS) / "frontend" / "dist")
+    def _find_frontend_dist() -> Path | None:
+        candidates: list[Path] = []
+        if hasattr(sys, "_MEIPASS"):
+            candidates.append(Path(sys._MEIPASS) / "frontend" / "dist")
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            candidates.append(exe_dir / "frontend" / "dist")
+            candidates.append(exe_dir.parent / "frontend" / "dist")
+        candidates.extend(
+            [
+                Path(__file__).resolve().parents[2] / "frontend" / "dist",
+                Path.cwd() / "frontend" / "dist",
+            ]
+        )
+        return next((p for p in candidates if (p / "index.html").exists()), None)
 
-    dist_dir = next((p for p in candidates if (p / "index.html").exists()), None)
-
-    if dist_dir and (dist_dir / "assets").exists():
+    initial_dist = _find_frontend_dist()
+    if initial_dist and (initial_dist / "assets").exists():
         app.mount(
             "/assets",
-            StaticFiles(directory=str(dist_dir / "assets")),
+            StaticFiles(directory=str(initial_dist / "assets")),
             name="frontend_assets",
         )
 
     @app.get("/")
     async def root(request: Request):
+        dist_dir = _find_frontend_dist()
         accept = request.headers.get("accept", "")
-        if dist_dir and "text/html" in accept:
-            return FileResponse(str(dist_dir / "index.html"))
-        if dist_dir and not accept:
+        if dist_dir and accept.strip().lower() != "application/json":
             return FileResponse(str(dist_dir / "index.html"))
         return JSONResponse(
             {
@@ -104,6 +110,7 @@ def create_app() -> FastAPI:
     async def spa_fallback(full_path: str):
         if full_path.startswith("api/") or full_path in {"docs", "redoc", "openapi.json"}:
             return JSONResponse({"detail": "Not Found"}, status_code=404)
+        dist_dir = _find_frontend_dist()
         if dist_dir:
             candidate_file = (dist_dir / full_path).resolve()
             if str(candidate_file).startswith(str(dist_dir.resolve())) and candidate_file.is_file():

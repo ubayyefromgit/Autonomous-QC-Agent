@@ -165,9 +165,12 @@ async def get_system_health(
     settings = get_settings()
     db_ok = False
     db_version = "unknown"
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
     try:
-        res = await session.execute(text("SELECT version()"))
-        db_version = str(res.scalar() or "PostgreSQL")
+        query_str = "SELECT sqlite_version()" if is_sqlite else "SELECT version()"
+        res = await session.execute(text(query_str))
+        ver_val = str(res.scalar() or "")
+        db_version = f"SQLite {ver_val} (Embedded Universal Mode)" if is_sqlite else ver_val
         db_ok = True
     except Exception as exc:
         db_version = f"Error: {exc}"
@@ -178,7 +181,7 @@ async def get_system_health(
         "version": settings.APP_VERSION,
         "database": {
             "connected": db_ok,
-            "engine": "PostgreSQL",
+            "engine": "SQLite (Embedded)" if is_sqlite else "PostgreSQL",
             "version": db_version,
         },
         "storage": {

@@ -2,15 +2,90 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Smooth theme transitions */
+body,
+aside,
+header,
+main,
+div,
+input,
+select,
+textarea {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+/* Light Theme Global Overrides */
+html.theme-light body,
+html.theme-light .bg-slate-950 {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+html.theme-light .bg-slate-950\/60 {
+  background-color: #f1f5f9 !important;
+}
+
+html.theme-light .bg-slate-900,
+html.theme-light .bg-slate-900\/70,
+html.theme-light .bg-slate-900\/40 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+html.theme-light .bg-slate-800 {
+  background-color: #f1f5f9 !important;
+  color: #1e293b !important;
+}
+
+html.theme-light .border-slate-800,
+html.theme-light .border-slate-700,
+html.theme-light .divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #e2e8f0 !important;
+}
+
+html.theme-light .text-slate-100,
+html.theme-light .text-slate-200 {
+  color: #0f172a !important;
+}
+
+html.theme-light .text-slate-300 {
+  color: #334155 !important;
+}
+
+html.theme-light .text-slate-400,
+html.theme-light .text-slate-500 {
+  color: #64748b !important;
+}
+
+html.theme-light .text-sky-300,
+html.theme-light .text-sky-400 {
+  color: #0284c7 !important;
+}
+
+html.theme-light .text-emerald-300,
+html.theme-light .text-emerald-400 {
+  color: #059669 !important;
+}
+
+html.theme-light .text-amber-300,
+html.theme-light .text-amber-400 {
+  color: #d97706 !important;
+}
+
+html.theme-light .text-rose-300,
+html.theme-light .text-rose-400 {
+  color: #e11d48 !important;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #090d16;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: #64748b55;
   border-radius: 3px;
 }
-

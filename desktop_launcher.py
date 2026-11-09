@@ -1,13 +1,20 @@
-"""Standalone Windows Executable (.exe) Launcher for the Autonomous QC & Project Audit Intelligence Platform.
+"""Universal Standalone Windows Executable (.exe) & Cross-Platform Launcher
+for the Autonomous QC & Project Audit Intelligence Platform.
 
-Compiled into `QC_Intelligence_Platform.exe` via PyInstaller.
-When opened (double-clicked or run from terminal), it:
-1. Ensures the local PostgreSQL 18 cluster (port 5433) is running.
-2. Starts the FastAPI + Bundled React UI server on http://127.0.0.1:8000.
-3. Opens the Interactive Project Upload, API Key & Instructions UI in a dedicated desktop window.
+Key Universal Portability Guarantees:
+1. Zero-Config Database Fallback: Automatically uses PostgreSQL if active, or
+   seamlessly falls back to an embedded SQLite database (`aiosqlite`) on any laptop.
+2. Smart Port Verification & Auto-Failover: Verifies whether port 8000 is actually
+   serving the QC Intelligence Platform (`/api/v1/system/health`). If another app
+   on the user's laptop occupies port 8000 (which previously caused `{"detail":"Not Found"}`),
+   automatically selects the next free port (8001, 8002, ...).
+3. In-Process & Bundled Execution: Runs FastAPI + Uvicorn + Bundled React UI directly
+   in-process (no external Python installation required when bundled) and verifies
+   HTTP 200 HTML readiness before opening the desktop window.
 """
 
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -33,13 +40,53 @@ def _get_app_root() -> Path:
 
 def _is_port_open(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.8)
+        s.settimeout(0.6)
         return s.connect_ex((host, port)) == 0
 
 
-def _ensure_postgres_running(app_root: Path) -> None:
+def _is_qc_server_running(host: str, port: int) -> bool:
+    """Verify that the service on host:port is genuinely the Autonomous QC Platform."""
+    if not _is_port_open(host, port):
+        return False
+    try:
+        req = urllib.request.Request(
+            f"http://{host}:{port}/api/v1/system/health",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status != 200:
+                return False
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            platform_name = str(data.get("app_name") or data.get("platform") or "")
+            return "Autonomous QC" in platform_name or data.get("status") == "HEALTHY"
+    except Exception:
+        return False
+
+
+def _select_available_port(host: str, preferred_port: int) -> tuple[int, bool]:
+    """Return (port, already_running_qc_server).
+    If preferred_port is occupied by a DIFFERENT service, automatically pick the next free port.
+    """
+    if _is_qc_server_running(host, preferred_port):
+        return preferred_port, True
+    if not _is_port_open(host, preferred_port):
+        return preferred_port, False
+
+    print(
+        f"[QC Launcher] Notice: Port {preferred_port} is occupied by another application on this machine."
+    )
+    for candidate in range(preferred_port + 1, preferred_port + 50):
+        if _is_qc_server_running(host, candidate):
+            return candidate, True
+        if not _is_port_open(host, candidate):
+            print(f"[QC Launcher] Auto-selected clean port: {candidate}")
+            return candidate, False
+    return preferred_port, False
+
+
+def _ensure_postgres_or_sqlite(app_root: Path) -> None:
     if _is_port_open("127.0.0.1", 5433):
-        print("[QC Launcher] PostgreSQL 18 is active on 127.0.0.1:5433.")
+        print("[QC Launcher] Database Mode: Local PostgreSQL 18 active on 127.0.0.1:5433.")
         return
 
     pg_exe = Path(r"C:\Program Files\PostgreSQL\18\bin\postgres.exe")
@@ -54,11 +101,15 @@ def _ensure_postgres_running(app_root: Path) -> None:
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
         )
-        for _ in range(24):
+        for _ in range(20):
             if _is_port_open("127.0.0.1", 5433):
                 print("[QC Launcher] PostgreSQL 18 started and accepting connections.")
                 return
-            time.sleep(0.4)
+            time.sleep(0.35)
+
+    print(
+        "[QC Launcher] Database Mode: Universal Zero-Config Embedded SQLite (no external DB installation needed)."
+    )
 
 
 def _open_desktop_ui_window(url: str) -> None:
@@ -90,30 +141,34 @@ def _open_desktop_ui_window(url: str) -> None:
     webbrowser.open(url)
 
 
-def _find_python_executable() -> str:
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    candidates = [
-        shutil.which("python"),
-        str(Path.home() / r"AppData\Local\Programs\Python\Python311\python.exe"),
-        str(Path.home() / r"AppData\Local\Programs\Python\Python312\python.exe"),
-    ]
-    for c in candidates:
-        if c and Path(c).exists():
-            return str(Path(c).resolve())
-    return "python"
-
-
-def _http_status(url: str) -> int:
-    req = urllib.request.Request(url, headers={"Accept": "text/html"})
+def _http_status(url: str, accept: str = "text/html") -> int:
+    req = urllib.request.Request(url, headers={"Accept": accept})
     with urllib.request.urlopen(req, timeout=5) as resp:
         return int(resp.status)
 
 
+def _start_uvicorn_in_thread(port: int) -> threading.Thread:
+    """Run FastAPI + Uvicorn in a background daemon thread."""
+    import uvicorn
+
+    from backend.app.main import app as fastapi_app
+
+    config = uvicorn.Config(
+        app=fastapi_app,
+        host="127.0.0.1",
+        port=port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    return t
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="QC Intelligence Platform Desktop .EXE Launcher")
+    parser = argparse.ArgumentParser(description="QC Intelligence Platform Universal Desktop Launcher")
     parser.add_argument(
-        "--port", type=int, default=8000, help="Local port for the QC Platform UI & API"
+        "--port", type=int, default=8000, help="Preferred local port for the QC Platform UI & API"
     )
     parser.add_argument(
         "--no-browser", action="store_true", help="Start server without opening UI window"
@@ -127,59 +182,37 @@ def main() -> int:
 
     app_root = _get_app_root()
     os.chdir(app_root)
+    if str(app_root) not in sys.path:
+        sys.path.insert(0, str(app_root))
 
     print("=" * 76)
-    print("  AUTONOMOUS QC & PROJECT AUDIT INTELLIGENCE PLATFORM v1.0 (.EXE)")
-    print("  Interactive Project Upload, API Key Setup, Readiness Advisor & Audit UI")
+    print("  AUTONOMOUS QC & PROJECT AUDIT INTELLIGENCE PLATFORM v1.0")
+    print("  Universal Zero-Config Desktop Application (Light / Dark Minimal UI)")
     print("=" * 76)
     print(f"[QC Launcher] Application Directory: {app_root}")
 
-    _ensure_postgres_running(app_root)
+    _ensure_postgres_or_sqlite(app_root)
 
-    url = f"http://127.0.0.1:{args.port}"
-    python_bin = _find_python_executable()
+    port, already_running = _select_available_port("127.0.0.1", args.port)
+    url = f"http://127.0.0.1:{port}"
 
     if args.verify_startup:
-        proc = None
-        if not _is_port_open("127.0.0.1", args.port):
-            proc = subprocess.Popen(
-                [
-                    python_bin,
-                    "-m",
-                    "uvicorn",
-                    "backend.app.main:app",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(args.port),
-                ],
-                cwd=str(app_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for _ in range(40):
-                if _is_port_open("127.0.0.1", args.port):
+        if not already_running:
+            _start_uvicorn_in_thread(port)
+            for _ in range(50):
+                if _is_qc_server_running("127.0.0.1", port):
                     break
                 time.sleep(0.25)
 
-        try:
-            st_health = _http_status(f"{url}/api/v1/system/health")
-            st_runtime = _http_status(f"{url}/api/v1/system/runtime-config")
-            st_ui = _http_status(url)
-            print(
-                f"[QC Launcher] Verified EXE Startup! Health={st_health}, RuntimeConfig={st_runtime}, UI={st_ui}"
-            )
-            return 0 if (st_health == 200 and st_runtime == 200 and st_ui == 200) else 1
-        finally:
-            if proc is not None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    proc.kill()
+        st_health = _http_status(f"{url}/api/v1/system/health", accept="application/json")
+        st_runtime = _http_status(f"{url}/api/v1/system/runtime-config", accept="application/json")
+        st_ui = _http_status(url, accept="text/html")
+        print(
+            f"[QC Launcher] Verified Universal Startup on {url}! Health={st_health}, RuntimeConfig={st_runtime}, UI={st_ui}"
+        )
+        return 0 if (st_health == 200 and st_runtime == 200 and st_ui == 200) else 1
 
-    if _is_port_open("127.0.0.1", args.port):
+    if already_running:
         print(f"[QC Launcher] QC Server is already running at {url}")
         if not args.no_browser:
             print(f"[QC Launcher] Opening Interactive UI Window -> {url}")
@@ -188,34 +221,28 @@ def main() -> int:
 
     if not args.no_browser:
         def _delayed_open() -> None:
-            for _ in range(40):
-                if _is_port_open("127.0.0.1", args.port):
-                    time.sleep(0.3)
-                    print(f"[QC Launcher] Opening Interactive UI Window -> {url}")
-                    _open_desktop_ui_window(url)
-                    return
+            for _ in range(60):
+                if _is_qc_server_running("127.0.0.1", port):
+                    try:
+                        if _http_status(url, accept="text/html") == 200:
+                            print(f"[QC Launcher] Opening Interactive UI Window -> {url}")
+                            _open_desktop_ui_window(url)
+                            return
+                    except Exception:
+                        pass
                 time.sleep(0.25)
 
         threading.Thread(target=_delayed_open, daemon=True).start()
 
     print(f"[QC Launcher] Starting Local QC Server at {url} (Close window or Ctrl+C to stop)...")
-    proc = subprocess.Popen(
-        [
-            python_bin,
-            "-m",
-            "uvicorn",
-            "backend.app.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(args.port),
-        ],
-        cwd=str(app_root),
-    )
     try:
-        return proc.wait()
+        import uvicorn
+
+        from backend.app.main import app as fastapi_app
+
+        uvicorn.run(fastapi_app, host="127.0.0.1", port=port, log_level="info")
+        return 0
     except KeyboardInterrupt:
-        proc.terminate()
         return 0
 
 

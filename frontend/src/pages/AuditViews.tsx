@@ -3,6 +3,20 @@ import { Link, useSearchParams } from "react-router-dom";
 import { qcApi } from "../services/api";
 import type { AuditProgress, AuditSession, Project, TestRun } from "../types/qc";
 
+function formatTs(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 export const AuditSessionsPage: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [audits, setAudits] = useState<AuditSession[]>([]);
@@ -118,6 +132,8 @@ export const AuditSessionsPage: React.FC = () => {
             <tr className="border-b border-slate-800 text-slate-400">
               <th className="py-2 pr-3">Session ID</th>
               <th className="py-2 pr-3">Project</th>
+              <th className="py-2 pr-3">Started At</th>
+              <th className="py-2 pr-3">Completed At</th>
               <th className="py-2 pr-3">Scope / Runner</th>
               <th className="py-2 pr-3">Phase / Status</th>
               <th className="py-2 pr-3">Tasks</th>
@@ -134,6 +150,12 @@ export const AuditSessionsPage: React.FC = () => {
                 </td>
                 <td className="py-2.5 pr-3 font-medium">
                   {a.project_name || a.project_id.slice(0, 8)}
+                </td>
+                <td className="py-2.5 pr-3 font-mono text-[11px] text-slate-300">
+                  {formatTs(a.started_at || a.created_at)}
+                </td>
+                <td className="py-2.5 pr-3 font-mono text-[11px] text-slate-300">
+                  {formatTs(a.completed_at)}
                 </td>
                 <td className="py-2.5 pr-3">
                   {a.audit_scope} / <span className="font-mono">{a.runner_mode}</span>
@@ -239,8 +261,7 @@ export const LiveAuditMonitorPage: React.FC = () => {
           >
             {audits.map((a) => (
               <option key={a.id} value={a.id}>
-                {a.project_name || a.project_id.slice(0, 8)} — {a.audit_scope} (
-                {a.status})
+                {a.project_name || a.project_id.slice(0, 8)} — {formatTs(a.started_at || a.created_at)} — {a.audit_scope} ({a.status})
               </option>
             ))}
           </select>

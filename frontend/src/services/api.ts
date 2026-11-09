@@ -153,6 +153,7 @@ export const qcApi = {
     payload: {
       audit_scope: string;
       runner_mode: string;
+      custom_instructions?: string;
       run_immediately?: boolean;
       run_synchronously?: boolean;
     }

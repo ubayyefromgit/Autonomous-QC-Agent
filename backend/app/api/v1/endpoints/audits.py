@@ -81,6 +81,9 @@ async def create_and_start_audit(
         audit_scope=payload.audit_scope.upper(),
         runner_mode=payload.runner_mode.upper(),
         release_gate="INCOMPLETE_AUDIT",
+        environment_snapshot={
+            "custom_instructions": (payload.custom_instructions or "").strip(),
+        },
     )
     session.add(audit_session)
     await session.commit()

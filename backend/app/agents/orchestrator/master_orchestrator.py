@@ -28,6 +28,7 @@ from backend.app.domain.enums.audit_enums import (
     TaskStatus,
 )
 from backend.app.domain.interfaces.contracts import AuditContext, AuditTaskDTO
+from backend.app.infrastructure.ai.llm_gateway import LLMRequest, UnifiedLLMGateway
 from backend.app.infrastructure.execution.project_runner import get_project_runner
 from backend.app.models.entities import (
     AgentExecution,
@@ -139,9 +140,13 @@ class MasterAuditOrchestrator:
         )
 
         try:
-            # Record snapshot verification log
+            # Record snapshot verification log while preserving custom_instructions
+            existing_env_snap = dict(audit_session.environment_snapshot or {})
+            custom_instructions = str(existing_env_snap.get("custom_instructions", "")).strip()
             snap_info = await runner.verify_snapshot(workspace)
             audit_session.environment_snapshot = {
+                **existing_env_snap,
+                "custom_instructions": custom_instructions,
                 "python_version": sys.version,
                 "os": platform.platform(),
                 "runner_mode": audit_session.runner_mode,
@@ -257,6 +262,7 @@ class MasterAuditOrchestrator:
                 configuration={
                     "exclusions": custom_exclusions,
                     "quality_gate_policy": quality_policy,
+                    "custom_instructions": custom_instructions,
                     "skip_nested_pytest": bool(
                         config_row and config_row.custom_rules.get("skip_nested_pytest")
                     ),
@@ -478,6 +484,24 @@ class MasterAuditOrchestrator:
                 coverage_percent=coverage_pct,
                 custom_policy=quality_policy,
             )
+            completed_ts = datetime.now(UTC)
+            audit_session.completed_at = completed_ts
+            started_ts = audit_session.started_at or completed_ts
+            if started_ts.tzinfo is None:
+                started_ts = started_ts.replace(tzinfo=UTC)
+            duration_sec = round(max(0.1, (completed_ts - started_ts).total_seconds()), 2)
+
+            readable_insights = await self._synthesize_readable_insights(
+                audit_session=audit_session,
+                project=project,
+                findings_rows=findings_rows,
+                tasks_rows=tasks_rows,
+                test_rows=test_rows,
+                scorecard=scorecard,
+                custom_instructions=custom_instructions,
+                duration_sec=duration_sec,
+            )
+            scorecard["readable_insights"] = readable_insights
             audit_session.scorecard = scorecard
             audit_session.overall_score = scorecard["overall_score"]
             audit_session.release_gate = scorecard["release_gate"]
@@ -530,6 +554,176 @@ class MasterAuditOrchestrator:
                 deps = [d for d in item.get("dependencies", []) if d in allowed_keys]
                 filtered.append({**item, "dependencies": deps})
         return filtered
+
+    async def _synthesize_readable_insights(
+        self,
+        audit_session: AuditSession,
+        project: Project,
+        findings_rows: list[Finding],
+        tasks_rows: list[AuditTask],
+        test_rows: list[TestRun],
+        scorecard: dict[str, Any],
+        custom_instructions: str,
+        duration_sec: float,
+    ) -> dict[str, Any]:
+        manifest = audit_session.manifest_summary or {}
+        cov = manifest.get("coverage", {})
+        total_files = int(cov.get("total_discovered", 0))
+        in_scope = int(cov.get("in_scope", 0))
+        inspected = int(cov.get("inspected", 0))
+        cov_pct = float(cov.get("inspection_coverage_percent", 100.0))
+        langs = ", ".join(manifest.get("languages", [])) or "Unknown"
+        frameworks = ", ".join(manifest.get("frameworks", [])) or "Standard Stack"
+
+        sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        sev_counts: dict[str, int] = {k: 0 for k in sev_order}
+        for f in findings_rows:
+            s = str(f.severity or "INFO").upper()
+            sev_counts[s] = sev_counts.get(s, 0) + 1
+
+        sorted_findings = sorted(
+            findings_rows,
+            key=lambda x: sev_order.index(str(x.severity).upper())
+            if str(x.severity).upper() in sev_order
+            else 99,
+        )
+
+        top_findings_readable = [
+            {
+                "id": str(f.id),
+                "severity": f.severity,
+                "category": f.category,
+                "title": f.title,
+                "location": f"{f.file_path or 'project'}{f':{f.line_start}' if f.line_start else ''}",
+                "what_we_found": f.description,
+                "why_it_matters": f.impact or "Affects software reliability, security, or maintainability.",
+                "how_to_fix": f.recommended_fix or "Review source location and apply recommended code fix.",
+            }
+            for f in sorted_findings[:15]
+        ]
+
+        overall_score = float(scorecard.get("overall_score", 0.0))
+        gate = str(scorecard.get("release_gate", "Conditional"))
+        total_issues = len(findings_rows)
+        crit_high = sev_counts["CRITICAL"] + sev_counts["HIGH"]
+
+        executive_headline = (
+            f"Audited '{project.name}' in {duration_sec}s — inspected {inspected}/{in_scope} in-scope files "
+            f"({cov_pct:.0f}% coverage). Overall Score: {overall_score}/100 ({gate.replace('_', ' ')}) "
+            f"with {total_issues} finding(s) ({crit_high} Critical/High)."
+        )
+
+        total_tests = sum(int(t.total_tests or 0) for t in test_rows)
+        passed_tests = sum(int(t.passed_tests or 0) for t in test_rows)
+        failed_tests = sum(int(t.failed_tests or 0) for t in test_rows)
+
+        key_takeaways = [
+            f"Stack & Coverage: Detected {langs} ({frameworks}). Inspected {inspected} of {in_scope} in-scope files ({total_files} total discovered).",
+            (
+                f"Security & Risk Posture: No Critical or High severity vulnerabilities detected."
+                if crit_high == 0
+                else f"Security & Risk Posture: Found {sev_counts['CRITICAL']} Critical and {sev_counts['HIGH']} High severity issues that should be fixed first."
+            ),
+            (
+                f"Code Quality & Architecture: {sev_counts['MEDIUM']} Medium and {sev_counts['LOW']} Low severity code/architecture findings identified."
+                if (sev_counts["MEDIUM"] + sev_counts["LOW"]) > 0
+                else "Code Quality & Architecture: Clean structure with no major code or architecture smells."
+            ),
+            (
+                f"Automated Tests & Execution: Ran {total_tests} test(s) ({passed_tests} passed, {failed_tests} failed) across {len(tasks_rows)} audit agents."
+                if total_tests > 0
+                else f"Automated Tests & Execution: Completed {len(tasks_rows)} specialized audit agent checks across static, security, and runtime layers."
+            ),
+        ]
+
+        custom_response = ""
+        ai_model_used = "deterministic-analyzer"
+        if custom_instructions:
+            # Build concise context of project + findings for the user's custom instructions
+            findings_brief = "\n".join(
+                f"- [{f.severity}] ({f.category}) {f.title} at {f.file_path}:{f.line_start} -> {f.description}"
+                for f in sorted_findings[:12]
+            ) or "No defects or vulnerabilities were triggered by deterministic scanners."
+
+            # Deterministic match analysis first
+            keywords = [
+                w.lower()
+                for w in custom_instructions.replace(",", " ").replace(".", " ").split()
+                if len(w) >= 3
+            ]
+            matching_findings = [
+                f
+                for f in sorted_findings
+                if any(
+                    kw in f"{f.title} {f.description} {f.category} {f.file_path or ''}".lower()
+                    for kw in keywords
+                )
+            ]
+            det_summary = (
+                f"Based on your instruction (\"{custom_instructions}\"), we inspected {inspected} files across {langs} ({frameworks}). "
+            )
+            if matching_findings:
+                det_summary += (
+                    f"We identified {len(matching_findings)} directly related finding(s): "
+                    + "; ".join(
+                        f"[{m.severity}] {m.title} ({m.file_path or 'project'})"
+                        for m in matching_findings[:5]
+                    )
+                    + "."
+                )
+            elif sorted_findings:
+                det_summary += (
+                    f"No defects specifically violated that instruction topic, though {len(sorted_findings)} general finding(s) were detected across the project."
+                )
+            else:
+                det_summary += "All inspected files passed verification with 0 defects found for this focus area."
+
+            custom_response = det_summary
+            try:
+                gateway = UnifiedLLMGateway()
+                llm_resp = await gateway.generate(
+                    LLMRequest(
+                        system_prompt=(
+                            "You are a Principal Software QC Auditor. Respond in clear, plain, concise English "
+                            "(3 to 5 short bullet points) directly answering the user's custom audit instructions "
+                            "based on the actual project audit findings below."
+                        ),
+                        user_prompt=(
+                            f"Project: {project.name}\n"
+                            f"Detected Stack: {langs} ({frameworks})\n"
+                            f"Files Inspected: {inspected}/{in_scope}\n"
+                            f"Overall Score: {overall_score}/100 ({gate})\n"
+                            f"User Custom Audit Instructions: {custom_instructions}\n\n"
+                            f"Confirmed Audit Findings:\n{findings_brief}\n\n"
+                            "Provide a direct, easy-to-read response to the user's custom instructions and top actionable insights:"
+                        ),
+                        timeout_seconds=6.0,
+                    )
+                )
+                if (
+                    llm_resp.content
+                    and not llm_resp.used_fallback
+                    and llm_resp.provider != "deterministic_analyzer"
+                ):
+                    custom_response = llm_resp.content.strip()
+                    ai_model_used = f"{llm_resp.provider}:{llm_resp.model}"
+            except Exception:
+                pass
+
+        return {
+            "executive_headline": executive_headline,
+            "custom_instructions": custom_instructions,
+            "custom_instructions_response": custom_response,
+            "ai_model_used": ai_model_used,
+            "key_takeaways": key_takeaways,
+            "severity_counts": sev_counts,
+            "top_findings_readable": top_findings_readable,
+            "run_timing": {
+                "started_at": audit_session.started_at.isoformat() if audit_session.started_at else None,
+                "completed_at": audit_session.completed_at.isoformat() if audit_session.completed_at else None,
+                "duration_seconds": duration_sec,
+            },
+        }
 
     async def _emit_event(
         self,

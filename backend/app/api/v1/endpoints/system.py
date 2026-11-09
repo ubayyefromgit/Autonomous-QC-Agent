@@ -646,3 +646,180 @@ async def pick_local_folder(
         "selected_path": str(Path(chosen).resolve()) if chosen else "",
         "cancelled": not bool(chosen),
     }
+
+
+class ProviderModelsRequest(BaseModel):
+    provider: str
+    api_key: str | None = None
+    ollama_base_url: str | None = None
+
+
+@router.post("/provider-models")
+async def list_provider_models(
+    payload: ProviderModelsRequest,
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Fetch available AI models dynamically for the selected provider and API key."""
+    settings = get_settings()
+    provider = payload.provider.strip().lower()
+
+    if provider == "gemini":
+        key = (payload.api_key or "").strip() or settings.GEMINI_API_KEY
+        default_models = [
+            {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro (gemini-2.5-pro)"},
+            {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash (gemini-2.5-flash)"},
+            {"id": "gemini-2.0-flash", "label": "Gemini 2.0 Flash (gemini-2.0-flash)"},
+            {"id": "gemini-1.5-pro", "label": "Gemini 1.5 Pro (gemini-1.5-pro)"},
+            {"id": "gemini-1.5-flash", "label": "Gemini 1.5 Flash (gemini-1.5-flash)"},
+        ]
+        if not key:
+            return {
+                "provider": "gemini",
+                "source": "default_catalog",
+                "models": default_models,
+                "selected_model": settings.GEMINI_MODEL,
+                "error": "Enter a Gemini API Key and click 'Fetch Models' to load live models for your key.",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": key},
+                )
+            if resp.status_code != 200:
+                err_detail = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+                return {
+                    "provider": "gemini",
+                    "source": "default_catalog",
+                    "models": default_models,
+                    "selected_model": settings.GEMINI_MODEL,
+                    "error": f"Gemini API Key check failed: {err_detail}",
+                }
+            raw_models = resp.json().get("models", [])
+            live_models: list[dict[str, str]] = []
+            for m in raw_models:
+                methods = m.get("supportedGenerationMethods", [])
+                name = str(m.get("name", ""))
+                if "generateContent" in methods and name.startswith("models/"):
+                    short_id = name.replace("models/", "", 1)
+                    if "gemini" in short_id.lower():
+                        disp = m.get("displayName") or short_id
+                        live_models.append(
+                            {"id": short_id, "label": f"{disp} ({short_id})"}
+                        )
+            live_models.sort(key=lambda x: x["id"], reverse=True)
+            return {
+                "provider": "gemini",
+                "source": "live_api",
+                "models": live_models or default_models,
+                "selected_model": settings.GEMINI_MODEL,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "provider": "gemini",
+                "source": "default_catalog",
+                "models": default_models,
+                "selected_model": settings.GEMINI_MODEL,
+                "error": f"Could not reach Gemini API: {exc}",
+            }
+
+    if provider == "openai":
+        key = (payload.api_key or "").strip() or settings.OPENAI_API_KEY
+        default_models = [
+            {"id": "gpt-4o", "label": "GPT-4o (gpt-4o)"},
+            {"id": "gpt-4o-mini", "label": "GPT-4o Mini (gpt-4o-mini)"},
+            {"id": "o3-mini", "label": "OpenAI o3-mini (o3-mini)"},
+            {"id": "o1", "label": "OpenAI o1 (o1)"},
+            {"id": "gpt-4-turbo", "label": "GPT-4 Turbo (gpt-4-turbo)"},
+        ]
+        if not key:
+            return {
+                "provider": "openai",
+                "source": "default_catalog",
+                "models": default_models,
+                "selected_model": settings.OPENAI_MODEL,
+                "error": "Enter an OpenAI API Key and click 'Fetch Models' to load live models for your key.",
+            }
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                resp = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            if resp.status_code != 200:
+                err_detail = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+                return {
+                    "provider": "openai",
+                    "source": "default_catalog",
+                    "models": default_models,
+                    "selected_model": settings.OPENAI_MODEL,
+                    "error": f"OpenAI API Key check failed: {err_detail}",
+                }
+            raw_models = resp.json().get("data", [])
+            skip_tokens = ("audio", "realtime", "tts", "whisper", "dall-e", "embedding", "moderation", "babbage", "davinci", "transcribe", "search")
+            live_models = []
+            for m in raw_models:
+                mid = str(m.get("id", ""))
+                if mid.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-")) and not any(
+                    tok in mid.lower() for tok in skip_tokens
+                ):
+                    live_models.append({"id": mid, "label": mid})
+            live_models.sort(key=lambda x: x["id"], reverse=True)
+            return {
+                "provider": "openai",
+                "source": "live_api",
+                "models": live_models or default_models,
+                "selected_model": settings.OPENAI_MODEL,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "provider": "openai",
+                "source": "default_catalog",
+                "models": default_models,
+                "selected_model": settings.OPENAI_MODEL,
+                "error": f"Could not reach OpenAI API: {exc}",
+            }
+
+    # Default: ollama
+    base_url = ((payload.ollama_base_url or "").strip() or settings.OLLAMA_BASE_URL).rstrip("/")
+    default_ollama = [
+        {"id": "qwen2.5-coder:7b", "label": "Qwen 2.5 Coder 7B (qwen2.5-coder:7b)"},
+        {"id": "llama3.1:8b", "label": "Llama 3.1 8B (llama3.1:8b)"},
+        {"id": "deepseek-coder-v2:16b", "label": "DeepSeek Coder V2 16B (deepseek-coder-v2:16b)"},
+        {"id": "codellama:7b", "label": "CodeLlama 7B (codellama:7b)"},
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{base_url}/api/tags")
+        if resp.status_code == 200:
+            tags = resp.json().get("models", [])
+            live_ollama = [
+                {"id": str(t.get("name")), "label": f"{t.get('name')} (Local Ollama)"}
+                for t in tags
+                if t.get("name")
+            ]
+            if live_ollama:
+                return {
+                    "provider": "ollama",
+                    "source": "live_api",
+                    "models": live_ollama,
+                    "selected_model": settings.OLLAMA_MODEL,
+                    "error": None,
+                }
+        return {
+            "provider": "ollama",
+            "source": "default_catalog",
+            "models": default_ollama,
+            "selected_model": settings.OLLAMA_MODEL,
+            "error": None,
+        }
+    except Exception:
+        return {
+            "provider": "ollama",
+            "source": "default_catalog",
+            "models": default_ollama,
+            "selected_model": settings.OLLAMA_MODEL,
+            "error": None,
+        }

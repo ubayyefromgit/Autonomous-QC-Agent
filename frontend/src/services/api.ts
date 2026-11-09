@@ -67,6 +67,21 @@ export const qcApi = {
     request<{ selected_path: string; cancelled: boolean }>("/system/pick-folder", {
       method: "POST",
     }),
+  fetchProviderModels: (payload: {
+    provider: string;
+    api_key?: string;
+    ollama_base_url?: string;
+  }) =>
+    request<{
+      provider: string;
+      source: string;
+      models: { id: string; label: string }[];
+      selected_model: string;
+      error: string | null;
+    }>("/system/provider-models", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
 
   listProjects: () => request<Project[]>("/projects"),
   getProject: (id: string) => request<Project>(`/projects/${id}`),

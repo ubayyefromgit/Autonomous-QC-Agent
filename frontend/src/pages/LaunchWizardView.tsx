@@ -9,6 +9,7 @@ import {
   HelpCircle,
   KeyRound,
   Play,
+  RefreshCw,
   Terminal,
   UploadCloud,
 } from "lucide-react";
@@ -32,6 +33,13 @@ export const LaunchWizardPage: React.FC = () => {
   const [openaiKey, setOpenaiKey] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [runnerMode, setRunnerMode] = useState("LOCAL");
+
+  // Dynamic AI Models state for the selected provider & API key
+  const [selectedModel, setSelectedModel] = useState("qwen2.5-coder:7b");
+  const [providerModels, setProviderModels] = useState<{ id: string; label: string }[]>([]);
+  const [modelsSource, setModelsSource] = useState<string>("default_catalog");
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
 
   // Project intake tab state ("zip" | "files" | "folder" | "git")
   const [intakeTab, setIntakeTab] = useState<"zip" | "files" | "folder" | "git">("zip");
@@ -62,6 +70,43 @@ export const LaunchWizardPage: React.FC = () => {
     text: string;
   } | null>(null);
 
+  const fetchModelsForProvider = async (
+    prov: string,
+    overrideKey?: string,
+    overrideOllamaUrl?: string
+  ) => {
+    setFetchingModels(true);
+    setModelsError(null);
+    try {
+      const keyToUse =
+        overrideKey !== undefined
+          ? overrideKey
+          : prov === "gemini"
+          ? geminiKey
+          : prov === "openai"
+          ? openaiKey
+          : undefined;
+      const res = await qcApi.fetchProviderModels({
+        provider: prov,
+        api_key: keyToUse || undefined,
+        ollama_base_url: overrideOllamaUrl || ollamaUrl,
+      });
+      setProviderModels(res.models || []);
+      setModelsSource(res.source || "default_catalog");
+      setModelsError(res.error || null);
+      if (res.models && res.models.length > 0) {
+        const exists = res.models.some((m) => m.id === res.selected_model);
+        setSelectedModel(exists ? res.selected_model : res.models[0].id);
+      } else if (res.selected_model) {
+        setSelectedModel(res.selected_model);
+      }
+    } catch (err: any) {
+      setModelsError(err.message);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
   const loadInitial = async () => {
     const [rc, projs] = await Promise.all([
       qcApi.getRuntimeConfig(),
@@ -69,9 +114,15 @@ export const LaunchWizardPage: React.FC = () => {
     ]);
     setRuntimeConfig(rc);
     if (rc.ai_config) {
-      setLlmProvider(rc.ai_config.default_llm_provider || "ollama");
+      const initialProv = rc.ai_config.default_llm_provider || "ollama";
+      setLlmProvider(initialProv);
       setOllamaUrl(rc.ai_config.ollama_base_url || "http://127.0.0.1:11434");
       setRunnerMode(rc.ai_config.default_runner_mode || "LOCAL");
+      await fetchModelsForProvider(
+        initialProv,
+        undefined,
+        rc.ai_config.ollama_base_url || "http://127.0.0.1:11434"
+      );
     }
     setProjects(projs);
     if (projs.length > 0 && !selectedReadinessProjectId) {
@@ -96,21 +147,29 @@ export const LaunchWizardPage: React.FC = () => {
     setBusy(true);
     setStatusBanner(null);
     try {
-      const updated = await qcApi.updateRuntimeConfig({
+      const payload: Record<string, any> = {
         default_llm_provider: llmProvider,
         ollama_base_url: ollamaUrl,
         gemini_api_key: geminiKey || undefined,
         openai_api_key: openaiKey || undefined,
         github_token: githubToken || undefined,
         default_runner_mode: runnerMode,
-      });
+      };
+      if (llmProvider === "gemini") {
+        payload.gemini_model = selectedModel;
+      } else if (llmProvider === "openai") {
+        payload.openai_model = selectedModel;
+      } else {
+        payload.ollama_model = selectedModel;
+      }
+      const updated = await qcApi.updateRuntimeConfig(payload);
       setRuntimeConfig(updated);
       setGeminiKey("");
       setOpenaiKey("");
       setGithubToken("");
       setStatusBanner({
         type: "success",
-        text: "Configuration saved.",
+        text: `AI Provider (${llmProvider.toUpperCase()}) and Model (${selectedModel}) saved.`,
       });
       setShowApiKeys(false);
     } catch (err: any) {
@@ -331,8 +390,7 @@ export const LaunchWizardPage: React.FC = () => {
           >
             <KeyRound className="w-3.5 h-3.5 text-amber-400" />
             <span>
-              AI Mode: {llmProvider.toUpperCase()}
-              {llmProvider === "ollama" ? " (No Key Needed)" : ""}
+              AI: {llmProvider.toUpperCase()} ({selectedModel})
             </span>
             {showApiKeys ? (
               <ChevronUp className="w-3.5 h-3.5" />
@@ -428,12 +486,16 @@ export const LaunchWizardPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-slate-400 mb-1">AI Provider</label>
               <select
                 value={llmProvider}
-                onChange={(e) => setLlmProvider(e.target.value)}
+                onChange={(e) => {
+                  const nextProv = e.target.value;
+                  setLlmProvider(nextProv);
+                  fetchModelsForProvider(nextProv);
+                }}
                 className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700"
               >
                 <option value="ollama">Local / Deterministic (Free, No Key)</option>
@@ -447,12 +509,23 @@ export const LaunchWizardPage: React.FC = () => {
                 <label className="block text-slate-400 mb-1">
                   Local Ollama URL (Optional)
                 </label>
-                <input
-                  type="text"
-                  value={ollamaUrl}
-                  onChange={(e) => setOllamaUrl(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={ollamaUrl}
+                    onChange={(e) => setOllamaUrl(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
+                  />
+                  <button
+                    type="button"
+                    disabled={fetchingModels}
+                    onClick={() => fetchModelsForProvider("ollama", undefined, ollamaUrl)}
+                    className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
+                    <span>Fetch Models</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -461,17 +534,28 @@ export const LaunchWizardPage: React.FC = () => {
                 <label className="block text-slate-400 mb-1">
                   Google Gemini API Key
                 </label>
-                <input
-                  type="password"
-                  value={geminiKey}
-                  onChange={(e) => setGeminiKey(e.target.value)}
-                  placeholder={
-                    aiCfg.has_gemini_key
-                      ? `Saved (${aiCfg.gemini_key_masked})`
-                      : "Enter AIzaSy..."
-                  }
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={geminiKey}
+                    onChange={(e) => setGeminiKey(e.target.value)}
+                    placeholder={
+                      aiCfg.has_gemini_key
+                        ? `Saved (${aiCfg.gemini_key_masked})`
+                        : "Enter AIzaSy..."
+                    }
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
+                  />
+                  <button
+                    type="button"
+                    disabled={fetchingModels}
+                    onClick={() => fetchModelsForProvider("gemini", geminiKey)}
+                    className="px-3 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300 flex items-center gap-1.5 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
+                    <span>Fetch Models</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -480,19 +564,63 @@ export const LaunchWizardPage: React.FC = () => {
                 <label className="block text-slate-400 mb-1">
                   OpenAI API Key
                 </label>
-                <input
-                  type="password"
-                  value={openaiKey}
-                  onChange={(e) => setOpenaiKey(e.target.value)}
-                  placeholder={
-                    aiCfg.has_openai_key
-                      ? `Saved (${aiCfg.openai_key_masked})`
-                      : "Enter sk-..."
-                  }
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={openaiKey}
+                    onChange={(e) => setOpenaiKey(e.target.value)}
+                    placeholder={
+                      aiCfg.has_openai_key
+                        ? `Saved (${aiCfg.openai_key_masked})`
+                        : "Enter sk-..."
+                    }
+                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
+                  />
+                  <button
+                    type="button"
+                    disabled={fetchingModels}
+                    onClick={() => fetchModelsForProvider("openai", openaiKey)}
+                    className="px-3 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300 flex items-center gap-1.5 shrink-0"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
+                    <span>Fetch Models</span>
+                  </button>
+                </div>
               </div>
             )}
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-slate-400">
+                  Select Model ({llmProvider.toUpperCase()})
+                </label>
+                <span
+                  className={`text-[10px] font-semibold ${
+                    modelsSource === "live_api" ? "text-emerald-400" : "text-slate-400"
+                  }`}
+                >
+                  {modelsSource === "live_api"
+                    ? `✓ Live API (${providerModels.length} available)`
+                    : `Default List (${providerModels.length})`}
+                </span>
+              </div>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
+              >
+                {providerModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+              {modelsError && (
+                <div className="text-[11px] text-amber-400 mt-1">
+                  {modelsError}
+                </div>
+              )}
+            </div>
 
             <div>
               <label className="block text-slate-400 mb-1">

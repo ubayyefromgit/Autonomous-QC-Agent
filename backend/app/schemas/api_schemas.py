@@ -119,6 +119,7 @@ class AuditCreateRequest(BaseModel):
     audit_scope: str = "FULL"
     runner_mode: str = "LOCAL"
     custom_instructions: str = ""
+    project_documentation: str = ""
     run_immediately: bool = True
     run_synchronously: bool = False
 

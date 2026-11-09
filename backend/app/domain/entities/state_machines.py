@@ -81,7 +81,12 @@ PROPOSAL_STATE_TRANSITIONS: dict[ProposalStatus, set[ProposalStatus]] = {
         ProposalStatus.INVALIDATED,
         ProposalStatus.REJECTED,
     },
-    ProposalStatus.REJECTED: {ProposalStatus.DRAFT, ProposalStatus.SAFETY_CHECKED},
+    ProposalStatus.REJECTED: {
+        ProposalStatus.DRAFT,
+        ProposalStatus.SAFETY_CHECKED,
+        ProposalStatus.AWAITING_APPROVAL,
+        ProposalStatus.APPROVED,
+    },
     ProposalStatus.INVALIDATED: {ProposalStatus.SAFETY_CHECKED, ProposalStatus.DRAFT},
     ProposalStatus.APPLIED: {ProposalStatus.VERIFIED, ProposalStatus.FAILED},
     ProposalStatus.VERIFIED: set(),

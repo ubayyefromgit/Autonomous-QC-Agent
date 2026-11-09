@@ -72,8 +72,12 @@ export const LaunchWizardPage: React.FC = () => {
   const [intakeTab, setIntakeTab] = useState<"zip" | "files" | "folder" | "git">("zip");
   const [projectName, setProjectName] = useState("");
   const [auditScope, setAuditScope] = useState("FULL");
+  const [projectDocumentation, setProjectDocumentation] = useState("");
+  const [docFileNames, setDocFileNames] = useState<string[]>([]);
+  const docFileInputRef = useRef<HTMLInputElement | null>(null);
   const [customInstructions, setCustomInstructions] = useState("");
   const [targetEnvContent, setTargetEnvContent] = useState("");
+  const [generatingFixId, setGeneratingFixId] = useState<string | null>(null);
 
   // Instant Readable Audit Result & Run History state
   const [recentAudits, setRecentAudits] = useState<AuditSession[]>([]);
@@ -278,11 +282,72 @@ export const LaunchWizardPage: React.FC = () => {
     });
   };
 
+  const handleDocFilesUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const names: string[] = [];
+    const chunks: string[] = [];
+    for (const file of Array.from(files)) {
+      names.push(file.name);
+      try {
+        const rawText = await file.text();
+        // Clean out non-printable control characters if user uploaded a binary doc/pdf
+        const cleaned = rawText
+          .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]+/g, " ")
+          .trim()
+          .slice(0, 12000);
+        if (cleaned.length > 20) {
+          chunks.push(`--- Documentation File: ${file.name} ---\n${cleaned}`);
+        } else {
+          chunks.push(
+            `--- Documentation File: ${file.name} (${Math.round(file.size / 1024)} KB) ---`
+          );
+        }
+      } catch {
+        chunks.push(
+          `--- Documentation File: ${file.name} (${Math.round(file.size / 1024)} KB) ---`
+        );
+      }
+    }
+    setDocFileNames((prev) => Array.from(new Set([...prev, ...names])));
+    setProjectDocumentation((prev) =>
+      [prev.trim(), ...chunks].filter(Boolean).join("\n\n")
+    );
+    setStatusBanner({
+      type: "success",
+      text: `Loaded ${names.length} project documentation file(s): ${names.join(", ")}`,
+    });
+  };
+
+  const handleOpenFixApproval = async (findingId: string) => {
+    setGeneratingFixId(findingId);
+    try {
+      const proposal = await qcApi.createProposal(findingId);
+      navigate(`/approvals?proposalId=${proposal.id}`);
+    } catch (err: any) {
+      setStatusBanner({
+        type: "error",
+        text: `Could not generate code fix proposal: ${err.message}`,
+      });
+    } finally {
+      setGeneratingFixId(null);
+    }
+  };
+
   const handleProjectIntake = async (runAuditImmediately: boolean) => {
     setBusy(true);
     setStatusBanner(null);
     try {
+      if (runAuditImmediately && !projectDocumentation.trim()) {
+        throw new Error(
+          "Project Details & Documentation is required before running an audit. Please upload your project documentation file(s) (README, architecture, requirements) or enter the project details in Step 2 below."
+        );
+      }
+
       let createdProject: Project;
+      const docSummary =
+        projectDocumentation.trim().slice(0, 1000) ||
+        "Project registered via Launch Hub";
 
       if (intakeTab === "zip") {
         if (!zipFile) {
@@ -291,7 +356,7 @@ export const LaunchWizardPage: React.FC = () => {
         const fd = new FormData();
         fd.append("file", zipFile);
         fd.append("name", projectName || zipFile.name.replace(/\.zip$/i, ""));
-        fd.append("description", "Uploaded ZIP archive");
+        fd.append("description", docSummary);
         fd.append("execution_mode", runnerMode);
         fd.append("env_content", targetEnvContent);
         createdProject = await qcApi.uploadProjectZip(fd);
@@ -307,7 +372,7 @@ export const LaunchWizardPage: React.FC = () => {
         });
         fd.append("relative_paths", JSON.stringify(relPaths));
         fd.append("name", projectName || "Uploaded Source Project");
-        fd.append("description", "Uploaded project files");
+        fd.append("description", docSummary);
         fd.append("execution_mode", runnerMode);
         fd.append("env_content", targetEnvContent);
         createdProject = await qcApi.uploadProjectFiles(fd);
@@ -321,7 +386,7 @@ export const LaunchWizardPage: React.FC = () => {
           });
           fd.append("relative_paths", JSON.stringify(relPaths));
           fd.append("name", projectName || "Local Folder Project");
-          fd.append("description", "Local folder uploaded via browser picker");
+          fd.append("description", docSummary);
           fd.append("execution_mode", runnerMode);
           fd.append("env_content", targetEnvContent);
           createdProject = await qcApi.uploadProjectFiles(fd);
@@ -333,7 +398,7 @@ export const LaunchWizardPage: React.FC = () => {
           createdProject = await qcApi.createProject({
             name: projectName || parts[parts.length - 1] || "Local Software Project",
             root_path: localFolderPath.trim(),
-            description: "Local directory registered via Launch Hub",
+            description: docSummary,
             execution_mode: runnerMode,
           });
           if (targetEnvContent.trim()) {
@@ -364,6 +429,7 @@ export const LaunchWizardPage: React.FC = () => {
           audit_scope: auditScope,
           runner_mode: runnerMode,
           custom_instructions: customInstructions.trim() || undefined,
+          project_documentation: projectDocumentation.trim(),
           run_immediately: true,
           run_synchronously: true,
         });
@@ -372,7 +438,7 @@ export const LaunchWizardPage: React.FC = () => {
         await loadReadableResultForAudit(audit, true);
         setStatusBanner({
           type: "success",
-          text: `Audit completed for '${createdProject.name}' (Score: ${audit.overall_score ?? "—"}/100). View your readable insights below!`,
+          text: `Audit completed for '${createdProject.name}' (Score: ${audit.overall_score ?? "—"}/100). View your readable insights & file coverage below!`,
         });
       } else {
         const rd = await qcApi.getProjectReadiness(createdProject.id);
@@ -897,6 +963,98 @@ export const LaunchWizardPage: React.FC = () => {
           </div>
         </div>
 
+        {/* Step 2: Project Details & Documentation (REQUIRED TO RUN) */}
+        <div
+          className={`p-4 rounded-xl border space-y-3 ${
+            projectDocumentation.trim()
+              ? "bg-emerald-500/5 border-emerald-500/30"
+              : "bg-slate-950 border-amber-500/40"
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <FileText className="w-4 h-4 text-sky-400" />
+              <span className="text-slate-100 font-bold text-xs">
+                Project Details &amp; Documentation
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                  projectDocumentation.trim()
+                    ? "bg-emerald-500/20 text-emerald-400"
+                    : "bg-amber-500/20 text-amber-400"
+                }`}
+              >
+                {projectDocumentation.trim() ? "✓ PROVIDED" : "REQUIRED TO RUN"}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={docFileInputRef}
+                type="file"
+                multiple
+                accept=".md,.txt,.json,.yaml,.yml,.rst,.csv,.html,.pdf,.docx,.doc"
+                onChange={handleDocFilesUpload}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => docFileInputRef.current?.click()}
+                className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold flex items-center gap-1.5 text-[11px]"
+              >
+                <UploadCloud className="w-3.5 h-3.5" />
+                <span>Upload Documentation Files (.md, .txt, .pdf, .json)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setProjectDocumentation((prev) =>
+                    prev.trim()
+                      ? prev
+                      : "Project Purpose: Web application & backend API service.\nKey Modules: Authentication, core business logic, REST API endpoints, and database persistence.\nAudit Expectations: Verify architecture alignment, security controls, error handling, and production readiness."
+                  )
+                }
+                className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[11px]"
+              >
+                + Use Quick Template
+              </button>
+            </div>
+          </div>
+
+          {docFileNames.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-slate-400">Uploaded docs:</span>
+              {docFileNames.map((fn) => (
+                <span
+                  key={fn}
+                  className="px-2 py-0.5 rounded bg-sky-500/15 border border-sky-500/30 text-sky-300 font-mono"
+                >
+                  {fn}
+                </span>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setDocFileNames([]);
+                  setProjectDocumentation("");
+                }}
+                className="text-rose-400 hover:underline ml-1"
+              >
+                Clear
+              </button>
+            </div>
+          )}
+
+          <textarea
+            rows={3}
+            required
+            value={projectDocumentation}
+            onChange={(e) => setProjectDocumentation(e.target.value)}
+            placeholder="Upload your README / architecture / specification files above, or describe what this project does, its expected features, architecture, and business rules (Required before starting an audit)..."
+            className="w-full p-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+          />
+        </div>
+
         {/* Custom Audit Instructions / Focus Prompt */}
         <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -973,267 +1131,417 @@ export const LaunchWizardPage: React.FC = () => {
         </div>
 
         {/* Action Buttons */}
-        <div className="flex flex-wrap items-center justify-end gap-3 pt-2 border-t border-slate-800">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => handleProjectIntake(false)}
-            className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 font-medium text-slate-200 border border-slate-700 disabled:opacity-50"
-          >
-            Check Project Setup Instructions
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => handleProjectIntake(true)}
-            className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 font-semibold text-white flex items-center gap-2 disabled:opacity-50"
-          >
-            <Play className="w-4 h-4" />
-            <span>{busy ? "Running Audit..." : "Start Autonomous Audit"}</span>
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800">
+          <div className="text-[11px] text-slate-400">
+            {!projectDocumentation.trim() ? (
+              <span className="text-amber-400 font-medium">
+                * Please upload or enter Project Details &amp; Documentation above to enable the audit run.
+              </span>
+            ) : (
+              <span className="text-emerald-400 font-medium">
+                ✓ Project documentation ready for audit verification.
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => handleProjectIntake(false)}
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 font-medium text-slate-200 border border-slate-700 disabled:opacity-50"
+            >
+              Check Project Setup Instructions
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => handleProjectIntake(true)}
+              className="px-5 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 font-semibold text-white flex items-center gap-2 disabled:opacity-50"
+            >
+              <Play className="w-4 h-4" />
+              <span>{busy ? "Running Audit..." : "Start Autonomous Audit"}</span>
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Simple & Readable Audit Results & Actionable Insights Card */}
-      {activeAuditResult && (
-        <div
-          ref={resultsRef}
-          className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5 text-xs"
-        >
-          {/* Result Header + Run Timestamps */}
-          <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-4 h-4 text-sky-400" />
-                <span className="text-base font-bold text-slate-100">
-                  Audit Results &amp; Key Insights —{" "}
-                  {activeAuditResult.project_name || "Project"}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-400 pt-1">
-                <span className="flex items-center gap-1">
-                  <Clock className="w-3.5 h-3.5 text-sky-400" />
-                  <strong>Started:</strong>{" "}
-                  {formatRunTimestamp(
-                    activeAuditResult.started_at || activeAuditResult.created_at
-                  )}
-                </span>
-                <span>
-                  <strong>Completed:</strong>{" "}
-                  {formatRunTimestamp(activeAuditResult.completed_at)}
-                </span>
-                <span>
-                  <strong>Duration:</strong>{" "}
-                  {computeRunDuration(
-                    activeAuditResult.started_at || activeAuditResult.created_at,
-                    activeAuditResult.completed_at
-                  )}
-                </span>
-                <span>
-                  <strong>Scope:</strong> {activeAuditResult.audit_scope}
-                </span>
-              </div>
-            </div>
+      {activeAuditResult && (() => {
+        const rawCov =
+          activeAuditResult.manifest_summary?.coverage ||
+          activeAuditResult.scorecard?.readable_insights?.file_coverage_breakdown ||
+          {};
+        const filesDiscovered =
+          rawCov.files_discovered ?? rawCov.total_discovered ?? 0;
+        const filesInScope =
+          rawCov.files_in_scope ?? rawCov.in_scope ?? 0;
+        const filesInspected =
+          rawCov.files_inspected ?? rawCov.inspected ?? 0;
+        const filesExcluded =
+          rawCov.files_excluded ?? rawCov.excluded ?? 0;
+        const coveragePercent =
+          rawCov.inspection_coverage_percent ??
+          rawCov.coverage_percent ??
+          (filesInScope > 0
+            ? Math.round((filesInspected / filesInScope) * 100)
+            : 100);
+        const langCounts: Record<string, number> =
+          activeAuditResult.manifest_summary?.language_file_counts ||
+          rawCov.language_file_counts ||
+          {};
 
-            <div className="flex items-center gap-3">
-              <div className="text-right">
-                <div className="text-[10px] uppercase tracking-wider text-slate-400">
-                  Health Score
-                </div>
-                <div className="text-2xl font-extrabold text-sky-400">
-                  {activeAuditResult.overall_score ?? "—"}
-                  <span className="text-xs font-normal text-slate-400">/100</span>
-                </div>
-              </div>
-              <span
-                className={`px-3 py-1.5 rounded-lg font-bold text-xs ${
-                  activeAuditResult.release_gate === "APPROVED"
-                    ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
-                    : activeAuditResult.release_gate === "BLOCKED"
-                    ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
-                    : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
-                }`}
-              >
-                {activeAuditResult.release_gate.replace(/_/g, " ")}
-              </span>
-            </div>
-          </div>
+        // Fix any legacy cached "0/0" strings from older runs automatically
+        const rawHeadline =
+          activeAuditResult.scorecard?.readable_insights?.executive_headline ||
+          `Completed ${activeAuditResult.audit_scope} audit with overall score ${
+            activeAuditResult.overall_score ?? "—"
+          }/100 and ${activeAuditFindings.length} finding(s).`;
+        const cleanHeadline = rawHeadline.replace(
+          /inspected 0\/0 in-scope files/g,
+          `inspected ${filesInspected}/${filesInScope} in-scope files (${filesDiscovered} total discovered)`
+        );
 
-          {/* Plain-English Executive Headline */}
-          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <div className="font-semibold text-slate-100 text-sm">
-              Summary at a Glance
-            </div>
-            <p className="text-slate-300 leading-relaxed">
-              {activeAuditResult.scorecard?.readable_insights
-                ?.executive_headline ||
-                `Completed ${activeAuditResult.audit_scope} audit with overall score ${
-                  activeAuditResult.overall_score ?? "—"
-                }/100 and ${activeAuditFindings.length} finding(s).`}
-            </p>
-          </div>
+        const rawTakeaways: string[] =
+          activeAuditResult.scorecard?.readable_insights?.key_takeaways || [];
+        const cleanTakeaways = rawTakeaways.map((t) =>
+          t.replace(
+            /Inspected 0 of 0 in-scope files \(0 total discovered\)/g,
+            `Inspected ${filesInspected} of ${filesInScope} in-scope files (${filesDiscovered} total discovered, ${filesExcluded} excluded)`
+          )
+        );
 
-          {/* Direct Response to User's Custom Audit Instructions */}
-          {(activeAuditResult.scorecard?.readable_insights?.custom_instructions ||
-            activeAuditResult.environment_snapshot?.custom_instructions) && (
-            <div className="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-sky-400">
-                  Insights for Your Custom Instructions
-                </span>
-                {activeAuditResult.scorecard?.readable_insights
-                  ?.ai_model_used && (
-                  <span className="text-[10px] font-mono text-slate-400">
-                    Analyzed via{" "}
-                    {activeAuditResult.scorecard.readable_insights.ai_model_used}
-                  </span>
-                )}
-              </div>
-              <div className="text-[11px] text-slate-400 italic">
-                Prompt: &ldquo;
-                {activeAuditResult.scorecard?.readable_insights
-                  ?.custom_instructions ||
-                  activeAuditResult.environment_snapshot?.custom_instructions}
-                &rdquo;
-              </div>
-              <div className="text-slate-200 whitespace-pre-line leading-relaxed pt-1">
-                {activeAuditResult.scorecard?.readable_insights
-                  ?.custom_instructions_response ||
-                  "Custom focus instructions were applied across all active audit agents."}
-              </div>
-            </div>
-          )}
-
-          {/* Key Takeaways Grid */}
-          {activeAuditResult.scorecard?.readable_insights?.key_takeaways && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {(
-                activeAuditResult.scorecard.readable_insights
-                  .key_takeaways as string[]
-              ).map((takeaway, idx) => (
-                <div
-                  key={idx}
-                  className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-start gap-2.5"
-                >
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                  <span className="text-slate-200 leading-relaxed">
-                    {takeaway}
+        return (
+          <div
+            ref={resultsRef}
+            className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5 text-xs"
+          >
+            {/* Result Header + Run Timestamps */}
+            <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-800">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-sky-400" />
+                  <span className="text-base font-bold text-slate-100">
+                    Audit Results &amp; Key Insights —{" "}
+                    {activeAuditResult.project_name || "Project"}
                   </span>
                 </div>
-              ))}
-            </div>
-          )}
+                <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-400 pt-1">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-sky-400" />
+                    <strong>Started:</strong>{" "}
+                    {formatRunTimestamp(
+                      activeAuditResult.started_at || activeAuditResult.created_at
+                    )}
+                  </span>
+                  <span>
+                    <strong>Completed:</strong>{" "}
+                    {formatRunTimestamp(activeAuditResult.completed_at)}
+                  </span>
+                  <span>
+                    <strong>Duration:</strong>{" "}
+                    {computeRunDuration(
+                      activeAuditResult.started_at || activeAuditResult.created_at,
+                      activeAuditResult.completed_at
+                    )}
+                  </span>
+                  <span>
+                    <strong>Scope:</strong> {activeAuditResult.audit_scope}
+                  </span>
+                </div>
+              </div>
 
-          {/* Readable Findings List (Simple Plain-English Cards) */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-sm text-slate-100">
-                Actionable Findings ({activeAuditFindings.length})
-              </span>
-              {activeAuditFindings.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(`/findings?sessionId=${activeAuditResult.id}`)
-                  }
-                  className="text-sky-400 hover:underline font-medium"
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-400">
+                    Health Score
+                  </div>
+                  <div className="text-2xl font-extrabold text-sky-400">
+                    {activeAuditResult.overall_score ?? "—"}
+                    <span className="text-xs font-normal text-slate-400">/100</span>
+                  </div>
+                </div>
+                <span
+                  className={`px-3 py-1.5 rounded-lg font-bold text-xs ${
+                    activeAuditResult.release_gate === "APPROVED"
+                      ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+                      : activeAuditResult.release_gate === "BLOCKED"
+                      ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                      : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                  }`}
                 >
-                  Open Full Findings Explorer &rarr;
-                </button>
+                  {activeAuditResult.release_gate.replace(/_/g, " ")}
+                </span>
+              </div>
+            </div>
+
+            {/* Plain-English Executive Headline */}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+              <div className="font-semibold text-slate-100 text-sm">
+                Summary at a Glance
+              </div>
+              <p className="text-slate-300 leading-relaxed">{cleanHeadline}</p>
+            </div>
+
+            {/* Files Covered & Inspection Breakdown Strip */}
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-slate-100 text-xs">
+                  Files Covered &amp; Repository Inspection Breakdown
+                </span>
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 font-bold text-[11px]">
+                  {coveragePercent}% In-Scope Coverage ({filesInspected} / {filesInScope} files inspected)
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] uppercase text-slate-400">
+                    Total Files Discovered
+                  </div>
+                  <div className="text-lg font-extrabold text-slate-100 mt-0.5">
+                    {filesDiscovered}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] uppercase text-slate-400">
+                    In-Scope Source Files
+                  </div>
+                  <div className="text-lg font-extrabold text-sky-400 mt-0.5">
+                    {filesInScope}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] uppercase text-slate-400">
+                    Files Inspected
+                  </div>
+                  <div className="text-lg font-extrabold text-emerald-400 mt-0.5">
+                    {filesInspected}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-900 border border-slate-800">
+                  <div className="text-[10px] uppercase text-slate-400">
+                    Excluded / Ignored
+                  </div>
+                  <div className="text-lg font-extrabold text-slate-400 mt-0.5">
+                    {filesExcluded}
+                  </div>
+                </div>
+              </div>
+
+              {Object.keys(langCounts).length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-[11px] text-slate-400 mr-1">
+                    Files by Language:
+                  </span>
+                  {Object.entries(langCounts).map(([lang, count]) => (
+                    <span
+                      key={lang}
+                      className="px-2.5 py-0.5 rounded-md bg-slate-900 border border-slate-700 text-slate-200 font-mono text-[11px]"
+                    >
+                      {lang}: <strong>{count}</strong>
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
 
-            {activeAuditFindings.length === 0 ? (
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-emerald-400 font-medium flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>
-                  0 defects or vulnerabilities detected in this audit run. All inspected files passed checks!
-                </span>
+            {/* Direct Response to User's Custom Audit Instructions / Project Documentation */}
+            {(activeAuditResult.scorecard?.readable_insights?.custom_instructions ||
+              activeAuditResult.environment_snapshot?.custom_instructions ||
+              activeAuditResult.scorecard?.readable_insights?.project_documentation_summary ||
+              activeAuditResult.environment_snapshot?.project_documentation) && (
+              <div className="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sky-400">
+                    Project Documentation &amp; Custom Instructions Alignment
+                  </span>
+                  {activeAuditResult.scorecard?.readable_insights
+                    ?.ai_model_used && (
+                    <span className="text-[10px] font-mono text-slate-400">
+                      Analyzed via{" "}
+                      {activeAuditResult.scorecard.readable_insights.ai_model_used}
+                    </span>
+                  )}
+                </div>
+                {(activeAuditResult.scorecard?.readable_insights
+                  ?.custom_instructions ||
+                  activeAuditResult.environment_snapshot?.custom_instructions) && (
+                  <div className="text-[11px] text-slate-300 italic">
+                    Focus Prompt: &ldquo;
+                    {activeAuditResult.scorecard?.readable_insights
+                      ?.custom_instructions ||
+                      activeAuditResult.environment_snapshot?.custom_instructions}
+                    &rdquo;
+                  </div>
+                )}
+                <div className="text-slate-200 whitespace-pre-line leading-relaxed pt-1">
+                  {activeAuditResult.scorecard?.readable_insights
+                    ?.custom_instructions_response ||
+                    "Project documentation and custom focus instructions were evaluated across all active audit agents."}
+                </div>
               </div>
-            ) : (
-              <div className="space-y-2.5 max-h-[420px] overflow-y-auto pr-1">
-                {activeAuditFindings.slice(0, 12).map((f) => (
-                  <div
-                    key={f.id}
-                    className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            f.severity === "CRITICAL" || f.severity === "HIGH"
-                              ? "bg-rose-500/20 text-rose-400"
-                              : f.severity === "MEDIUM"
-                              ? "bg-amber-500/20 text-amber-400"
-                              : "bg-sky-500/20 text-sky-400"
-                          }`}
-                        >
-                          {f.severity}
-                        </span>
-                        <span className="font-bold text-slate-100">
-                          {f.title}
-                        </span>
-                      </div>
-                      <span className="font-mono text-[11px] text-sky-400">
-                        {f.file_path || "project"}
-                        {f.line_start ? `:${f.line_start}` : ""}
-                      </span>
-                    </div>
+            )}
 
-                    <p className="text-slate-300 leading-relaxed">
-                      <strong>Issue:</strong> {f.description}
-                    </p>
-                    {f.recommended_fix && (
-                      <p className="text-emerald-400/90 leading-relaxed">
-                        <strong>How to Fix:</strong> {f.recommended_fix}
-                      </p>
-                    )}
+            {/* Key Takeaways Grid */}
+            {cleanTakeaways.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {cleanTakeaways.map((takeaway, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-start gap-2.5"
+                  >
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <span className="text-slate-200 leading-relaxed">
+                      {takeaway}
+                    </span>
                   </div>
                 ))}
               </div>
             )}
-          </div>
 
-          {/* Quick Actions Footer */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800">
-            <div className="flex flex-wrap gap-2">
-              <a
-                href={`/api/v1/audits/${activeAuditResult.id}/reports/download?format=HTML`}
-                target="_blank"
-                rel="noreferrer"
-                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5"
-              >
-                <FileText className="w-3.5 h-3.5 text-sky-400" />
-                <span>Open HTML Report</span>
-              </a>
-              <button
-                type="button"
-                onClick={async () => {
-                  await qcApi.generateReport(activeAuditResult.id, "PDF");
-                  window.open(
-                    `/api/v1/audits/${activeAuditResult.id}/reports/download?format=PDF`,
-                    "_blank"
-                  );
-                }}
-                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5"
-              >
-                <FileText className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Download PDF Report</span>
-              </button>
+            {/* Readable Findings List (Simple Plain-English Cards + 1-Click Fix Approval) */}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-sm text-slate-100">
+                  Actionable Findings ({activeAuditFindings.length})
+                </span>
+                {activeAuditFindings.length > 0 && (
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => navigate("/approvals")}
+                      className="px-3 py-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 font-semibold"
+                    >
+                      Open Fix Approval Center &rarr;
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        navigate(`/findings?sessionId=${activeAuditResult.id}`)
+                      }
+                      className="text-sky-400 hover:underline font-medium"
+                    >
+                      All Findings &rarr;
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {activeAuditFindings.length === 0 ? (
+                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-emerald-400 font-medium flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    0 defects or vulnerabilities detected in this audit run. All inspected files passed checks!
+                  </span>
+                </div>
+              ) : (
+                <div className="space-y-2.5 max-h-[440px] overflow-y-auto pr-1">
+                  {activeAuditFindings.slice(0, 12).map((f) => (
+                    <div
+                      key={f.id}
+                      className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              f.severity === "CRITICAL" || f.severity === "HIGH"
+                                ? "bg-rose-500/20 text-rose-400"
+                                : f.severity === "MEDIUM"
+                                ? "bg-amber-500/20 text-amber-400"
+                                : "bg-sky-500/20 text-sky-400"
+                            }`}
+                          >
+                            {f.severity}
+                          </span>
+                          <span className="font-bold text-slate-100">
+                            {f.title}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[11px] text-sky-400">
+                            {f.file_path || "project"}
+                            {f.line_start ? `:${f.line_start}` : ""}
+                          </span>
+                          {f.file_path && (
+                            <button
+                              type="button"
+                              disabled={generatingFixId === f.id}
+                              onClick={() => handleOpenFixApproval(f.id)}
+                              className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold text-[11px]"
+                            >
+                              {generatingFixId === f.id
+                                ? "Preparing Fix..."
+                                : "Review & Approve Fix →"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <p className="text-slate-300 leading-relaxed">
+                        <strong>Issue:</strong> {f.description}
+                      </p>
+                      {f.recommended_fix && (
+                        <p className="text-emerald-400/90 leading-relaxed">
+                          <strong>How to Fix:</strong> {f.recommended_fix}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
-            <button
-              type="button"
-              onClick={() =>
-                navigate(`/live-monitor?auditId=${activeAuditResult.id}`)
-              }
-              className="px-4 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300"
-            >
-              View Detailed Agent Logs &amp; Telemetry &rarr;
-            </button>
+            {/* Quick Actions Footer */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-800">
+              <div className="flex flex-wrap gap-2">
+                <a
+                  href={`/api/v1/audits/${activeAuditResult.id}/reports/download?format=HTML`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Open HTML Report</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await qcApi.generateReport(activeAuditResult.id, "PDF");
+                    window.open(
+                      `/api/v1/audits/${activeAuditResult.id}/reports/download?format=PDF`,
+                      "_blank"
+                    );
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5"
+                >
+                  <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Download PDF Report</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => navigate("/approvals")}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 font-semibold text-white"
+                >
+                  Review &amp; Approve Code Fixes &rarr;
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate(`/live-monitor?auditId=${activeAuditResult.id}`)
+                  }
+                  className="px-4 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300"
+                >
+                  Agent Logs &rarr;
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Audit Run History with Timestamps */}
       {recentAudits.length > 0 && (

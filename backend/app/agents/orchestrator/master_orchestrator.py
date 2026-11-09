@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.agents.registry.agent_registry import AgentRegistry
+from backend.app.application.services.remediation_service import RemediationService
 from backend.app.audit_engine.discovery.repository_intelligence_engine import (
     RepositoryIntelligenceEngine,
 )
@@ -140,13 +141,15 @@ class MasterAuditOrchestrator:
         )
 
         try:
-            # Record snapshot verification log while preserving custom_instructions
+            # Record snapshot verification log while preserving custom_instructions and project_documentation
             existing_env_snap = dict(audit_session.environment_snapshot or {})
             custom_instructions = str(existing_env_snap.get("custom_instructions", "")).strip()
+            project_documentation = str(existing_env_snap.get("project_documentation", "")).strip()
             snap_info = await runner.verify_snapshot(workspace)
             audit_session.environment_snapshot = {
                 **existing_env_snap,
                 "custom_instructions": custom_instructions,
+                "project_documentation": project_documentation,
                 "python_version": sys.version,
                 "os": platform.platform(),
                 "runner_mode": audit_session.runner_mode,
@@ -263,6 +266,7 @@ class MasterAuditOrchestrator:
                     "exclusions": custom_exclusions,
                     "quality_gate_policy": quality_policy,
                     "custom_instructions": custom_instructions,
+                    "project_documentation": project_documentation,
                     "skip_nested_pytest": bool(
                         config_row and config_row.custom_rules.get("skip_nested_pytest")
                     ),
@@ -499,6 +503,7 @@ class MasterAuditOrchestrator:
                 test_rows=test_rows,
                 scorecard=scorecard,
                 custom_instructions=custom_instructions,
+                project_documentation=project_documentation,
                 duration_sec=duration_sec,
             )
             scorecard["readable_insights"] = readable_insights
@@ -506,6 +511,22 @@ class MasterAuditOrchestrator:
             audit_session.overall_score = scorecard["overall_score"]
             audit_session.release_gate = scorecard["release_gate"]
             await db.commit()
+
+            # Automatically generate Remediation Proposals for top actionable findings with source files
+            try:
+                rem_service = RemediationService()
+                sev_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+                candidate_findings = sorted(
+                    [f for f in findings_rows if f.file_path],
+                    key=lambda x: sev_rank.get(str(x.severity).upper(), 99),
+                )[:5]
+                for cf in candidate_findings:
+                    try:
+                        await rem_service.create_proposal(db=db, finding_id=cf.id)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             # PHASE 6: REPORTING
             self._transition_session(
@@ -564,14 +585,24 @@ class MasterAuditOrchestrator:
         test_rows: list[TestRun],
         scorecard: dict[str, Any],
         custom_instructions: str,
+        project_documentation: str,
         duration_sec: float,
     ) -> dict[str, Any]:
         manifest = audit_session.manifest_summary or {}
         cov = manifest.get("coverage", {})
-        total_files = int(cov.get("total_discovered", 0))
-        in_scope = int(cov.get("in_scope", 0))
-        inspected = int(cov.get("inspected", 0))
+        total_files = int(
+            cov.get("files_discovered", cov.get("total_discovered", 0))
+        )
+        in_scope = int(
+            cov.get("files_in_scope", cov.get("in_scope", 0))
+        )
+        inspected = int(
+            cov.get("files_inspected", cov.get("inspected", 0))
+        ) + int(cov.get("files_partially_inspected", 0))
+        excluded = int(cov.get("files_excluded", 0))
+        unsupported = int(cov.get("files_unsupported", 0))
         cov_pct = float(cov.get("inspection_coverage_percent", 100.0))
+        lang_counts = manifest.get("language_file_counts", {})
         langs = ", ".join(manifest.get("languages", [])) or "Unknown"
         frameworks = ", ".join(manifest.get("frameworks", [])) or "Standard Stack"
 
@@ -608,8 +639,9 @@ class MasterAuditOrchestrator:
         crit_high = sev_counts["CRITICAL"] + sev_counts["HIGH"]
 
         executive_headline = (
-            f"Audited '{project.name}' in {duration_sec}s — inspected {inspected}/{in_scope} in-scope files "
-            f"({cov_pct:.0f}% coverage). Overall Score: {overall_score}/100 ({gate.replace('_', ' ')}) "
+            f"Audited '{project.name}' in {duration_sec}s — inspected {inspected} of {in_scope} in-scope files "
+            f"({total_files} total discovered, {excluded} excluded; {cov_pct:.0f}% coverage). "
+            f"Overall Score: {overall_score}/100 ({gate.replace('_', ' ')}) "
             f"with {total_issues} finding(s) ({crit_high} Critical/High)."
         )
 
@@ -618,9 +650,9 @@ class MasterAuditOrchestrator:
         failed_tests = sum(int(t.failed_tests or 0) for t in test_rows)
 
         key_takeaways = [
-            f"Stack & Coverage: Detected {langs} ({frameworks}). Inspected {inspected} of {in_scope} in-scope files ({total_files} total discovered).",
+            f"Files Covered & Stack: Inspected {inspected}/{in_scope} in-scope files ({total_files} total discovered, {excluded} excluded) across {langs} ({frameworks}).",
             (
-                f"Security & Risk Posture: No Critical or High severity vulnerabilities detected."
+                "Security & Risk Posture: No Critical or High severity vulnerabilities detected."
                 if crit_high == 0
                 else f"Security & Risk Posture: Found {sev_counts['CRITICAL']} Critical and {sev_counts['HIGH']} High severity issues that should be fixed first."
             ),
@@ -636,19 +668,27 @@ class MasterAuditOrchestrator:
             ),
         ]
 
+        doc_alignment = ""
+        if project_documentation:
+            doc_Preview = project_documentation[:300].replace("\n", " ")
+            doc_alignment = (
+                f"Verified project documentation ({len(project_documentation)} chars: \"{doc_Preview}...\") against "
+                f"{inspected} inspected source files in {langs} ({frameworks}). "
+                f"Detected {len(manifest.get('entrypoints', []))} entrypoint(s) and {total_issues} total code/runtime findings."
+            )
+
         custom_response = ""
         ai_model_used = "deterministic-analyzer"
-        if custom_instructions:
-            # Build concise context of project + findings for the user's custom instructions
+        combined_prompt = custom_instructions or project_documentation
+        if combined_prompt:
             findings_brief = "\n".join(
                 f"- [{f.severity}] ({f.category}) {f.title} at {f.file_path}:{f.line_start} -> {f.description}"
                 for f in sorted_findings[:12]
             ) or "No defects or vulnerabilities were triggered by deterministic scanners."
 
-            # Deterministic match analysis first
             keywords = [
                 w.lower()
-                for w in custom_instructions.replace(",", " ").replace(".", " ").split()
+                for w in combined_prompt.replace(",", " ").replace(".", " ").split()
                 if len(w) >= 3
             ]
             matching_findings = [
@@ -660,11 +700,11 @@ class MasterAuditOrchestrator:
                 )
             ]
             det_summary = (
-                f"Based on your instruction (\"{custom_instructions}\"), we inspected {inspected} files across {langs} ({frameworks}). "
+                f"Evaluated your project documentation and instructions against {inspected}/{in_scope} inspected files ({langs} / {frameworks}). "
             )
             if matching_findings:
                 det_summary += (
-                    f"We identified {len(matching_findings)} directly related finding(s): "
+                    f"Identified {len(matching_findings)} directly related finding(s): "
                     + "; ".join(
                         f"[{m.severity}] {m.title} ({m.file_path or 'project'})"
                         for m in matching_findings[:5]
@@ -673,10 +713,10 @@ class MasterAuditOrchestrator:
                 )
             elif sorted_findings:
                 det_summary += (
-                    f"No defects specifically violated that instruction topic, though {len(sorted_findings)} general finding(s) were detected across the project."
+                    f"No defects specifically violated your custom focus topic, though {len(sorted_findings)} general finding(s) were detected across the project."
                 )
             else:
-                det_summary += "All inspected files passed verification with 0 defects found for this focus area."
+                det_summary += "All inspected files passed verification with 0 defects found."
 
             custom_response = det_summary
             try:
@@ -685,17 +725,18 @@ class MasterAuditOrchestrator:
                     LLMRequest(
                         system_prompt=(
                             "You are a Principal Software QC Auditor. Respond in clear, plain, concise English "
-                            "(3 to 5 short bullet points) directly answering the user's custom audit instructions "
-                            "based on the actual project audit findings below."
+                            "(3 to 5 short bullet points) directly evaluating the project against the provided "
+                            "Project Documentation and Custom Audit Instructions."
                         ),
                         user_prompt=(
                             f"Project: {project.name}\n"
                             f"Detected Stack: {langs} ({frameworks})\n"
-                            f"Files Inspected: {inspected}/{in_scope}\n"
+                            f"Files Inspected: {inspected}/{in_scope} ({total_files} total discovered)\n"
                             f"Overall Score: {overall_score}/100 ({gate})\n"
-                            f"User Custom Audit Instructions: {custom_instructions}\n\n"
+                            f"Project Documentation / Details:\n{project_documentation[:2500] or 'N/A'}\n\n"
+                            f"User Custom Audit Instructions:\n{custom_instructions or 'General full-stack audit'}\n\n"
                             f"Confirmed Audit Findings:\n{findings_brief}\n\n"
-                            "Provide a direct, easy-to-read response to the user's custom instructions and top actionable insights:"
+                            "Provide a direct, easy-to-read response comparing the documentation/instructions with the actual audit findings:"
                         ),
                         timeout_seconds=6.0,
                     )
@@ -713,9 +754,19 @@ class MasterAuditOrchestrator:
         return {
             "executive_headline": executive_headline,
             "custom_instructions": custom_instructions,
+            "project_documentation_summary": doc_alignment,
             "custom_instructions_response": custom_response,
             "ai_model_used": ai_model_used,
             "key_takeaways": key_takeaways,
+            "file_coverage_breakdown": {
+                "files_discovered": total_files,
+                "files_in_scope": in_scope,
+                "files_inspected": inspected,
+                "files_excluded": excluded,
+                "files_unsupported": unsupported,
+                "inspection_coverage_percent": cov_pct,
+                "language_file_counts": lang_counts,
+            },
             "severity_counts": sev_counts,
             "top_findings_readable": top_findings_readable,
             "run_timing": {

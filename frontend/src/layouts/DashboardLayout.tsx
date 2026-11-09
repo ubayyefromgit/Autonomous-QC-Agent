@@ -27,24 +27,21 @@ import {
 import { qcApi } from "../services/api";
 
 const PRIMARY_NAV = [
-  { to: "/", label: "Launch & Upload", icon: Rocket },
-  { to: "/overview", label: "Overview", icon: LayoutDashboard },
+  { to: "/", label: "New Audit & Results", icon: Rocket },
+  { to: "/findings", label: "Findings & Issues", icon: AlertTriangle },
+  { to: "/approvals", label: "Fix Approvals", icon: CheckCircle2 },
+  { to: "/reports", label: "Audit Reports", icon: FileSpreadsheet },
   { to: "/projects", label: "Projects", icon: FolderGit2 },
-  { to: "/live-monitor", label: "Live Audit Monitor", icon: Radio },
-  { to: "/findings", label: "Findings", icon: AlertTriangle },
-  { to: "/approvals", label: "Approval Center", icon: CheckCircle2 },
-  { to: "/reports", label: "Reports (HTML/PDF)", icon: FileSpreadsheet },
 ];
 
 const ADVANCED_NAV = [
-  { to: "/audits", label: "Audit Sessions", icon: PlayCircle },
-  { to: "/repository", label: "Repository Files", icon: FileCode2 },
+  { to: "/overview", label: "Dashboard Overview", icon: LayoutDashboard },
+  { to: "/live-monitor", label: "Live Agent Monitor", icon: Radio },
+  { to: "/repository", label: "Files & Coverage", icon: FileCode2 },
   { to: "/evidence", label: "Evidence Vault", icon: ShieldCheck },
-  { to: "/test-results", label: "Test Execution", icon: TestTube2 },
-  { to: "/security", label: "Security Posture", icon: ShieldAlert },
-  { to: "/performance", label: "Performance", icon: Gauge },
-  { to: "/remediation", label: "Patch Proposals", icon: GitPullRequestDraft },
-  { to: "/agent-activity", label: "Agent Telemetry", icon: Bot },
+  { to: "/test-results", label: "Test Runs", icon: TestTube2 },
+  { to: "/security", label: "Security Details", icon: ShieldAlert },
+  { to: "/performance", label: "Performance Details", icon: Gauge },
   { to: "/settings", label: "System Settings", icon: Settings },
 ];
 

@@ -83,6 +83,7 @@ async def create_and_start_audit(
         release_gate="INCOMPLETE_AUDIT",
         environment_snapshot={
             "custom_instructions": (payload.custom_instructions or "").strip(),
+            "project_documentation": (payload.project_documentation or "").strip(),
         },
     )
     session.add(audit_session)

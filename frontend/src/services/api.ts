@@ -154,6 +154,7 @@ export const qcApi = {
       audit_scope: string;
       runner_mode: string;
       custom_instructions?: string;
+      project_documentation?: string;
       run_immediately?: boolean;
       run_synchronously?: boolean;
     }

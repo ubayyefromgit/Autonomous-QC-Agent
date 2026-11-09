@@ -68,18 +68,18 @@ def create_app() -> FastAPI:
 
     def _find_frontend_dist() -> Path | None:
         candidates: list[Path] = []
-        if hasattr(sys, "_MEIPASS"):
-            candidates.append(Path(sys._MEIPASS) / "frontend" / "dist")
         if getattr(sys, "frozen", False):
             exe_dir = Path(sys.executable).resolve().parent
             candidates.append(exe_dir / "frontend" / "dist")
             candidates.append(exe_dir.parent / "frontend" / "dist")
         candidates.extend(
             [
-                Path(__file__).resolve().parents[2] / "frontend" / "dist",
                 Path.cwd() / "frontend" / "dist",
+                Path(__file__).resolve().parents[2] / "frontend" / "dist",
             ]
         )
+        if hasattr(sys, "_MEIPASS"):
+            candidates.append(Path(sys._MEIPASS) / "frontend" / "dist")
         return next((p for p in candidates if (p / "index.html").exists()), None)
 
     initial_dist = _find_frontend_dist()

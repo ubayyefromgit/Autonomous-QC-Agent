@@ -599,6 +599,10 @@ async def upload_project_files(
         content = await upload.read()
         target_path.write_bytes(content)
 
+    children = [p for p in dest_dir.iterdir() if p.name != "__MACOSX"]
+    if len(children) == 1 and children[0].is_dir():
+        dest_dir = children[0].resolve()
+
     if env_content.strip():
         (dest_dir / ".env").write_text(env_content.strip() + "\n", encoding="utf-8")
 

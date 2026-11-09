@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   CheckCircle2,
@@ -42,7 +42,10 @@ export const LaunchWizardPage: React.FC = () => {
   // ZIP / Files / Folder / Git state
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [multiFiles, setMultiFiles] = useState<FileList | null>(null);
+  const [folderFiles, setFolderFiles] = useState<FileList | null>(null);
   const [localFolderPath, setLocalFolderPath] = useState("");
+  const [browsingFolder, setBrowsingFolder] = useState(false);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [gitRepoUrl, setGitRepoUrl] = useState("");
   const [gitBranch, setGitBranch] = useState("main");
   const [gitPrivateToken, setGitPrivateToken] = useState("");
@@ -118,13 +121,15 @@ export const LaunchWizardPage: React.FC = () => {
   };
 
   const handlePickNativeFolder = async () => {
+    setBrowsingFolder(true);
     setStatusBanner({
       type: "info",
-      text: "Opening folder browser...",
+      text: "Opening folder browser dialog... (Check your taskbar if it opens behind the window, or use 'Pick in Browser')",
     });
     try {
       const res = await qcApi.pickLocalFolder();
       if (!res.cancelled && res.selected_path) {
+        setFolderFiles(null);
         setLocalFolderPath(res.selected_path);
         if (!projectName) {
           const parts = res.selected_path.replace(/\\/g, "/").split("/");
@@ -139,7 +144,25 @@ export const LaunchWizardPage: React.FC = () => {
       }
     } catch (err: any) {
       setStatusBanner({ type: "error", text: err.message });
+    } finally {
+      setBrowsingFolder(false);
     }
+  };
+
+  const handleBrowserFolderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setFolderFiles(files);
+    const firstRel = (files[0] as any).webkitRelativePath || files[0].name || "SelectedFolder";
+    const topFolder = firstRel.split("/")[0] || "SelectedFolder";
+    setLocalFolderPath(`${topFolder} (${files.length} files selected via browser)`);
+    if (!projectName) {
+      setProjectName(topFolder);
+    }
+    setStatusBanner({
+      type: "success",
+      text: `Selected folder '${topFolder}' (${files.length} files) via browser.`,
+    });
   };
 
   const handleProjectIntake = async (runAuditImmediately: boolean) => {
@@ -176,18 +199,33 @@ export const LaunchWizardPage: React.FC = () => {
         fd.append("env_content", targetEnvContent);
         createdProject = await qcApi.uploadProjectFiles(fd);
       } else if (intakeTab === "folder") {
-        if (!localFolderPath.trim()) {
-          throw new Error("Please enter or browse a valid local folder path.");
-        }
-        const parts = localFolderPath.replace(/\\/g, "/").split("/");
-        createdProject = await qcApi.createProject({
-          name: projectName || parts[parts.length - 1] || "Local Software Project",
-          root_path: localFolderPath.trim(),
-          description: "Local directory registered via Launch Hub",
-          execution_mode: runnerMode,
-        });
-        if (targetEnvContent.trim()) {
-          await qcApi.saveProjectEnv(createdProject.id, targetEnvContent);
+        if (folderFiles && folderFiles.length > 0) {
+          const fd = new FormData();
+          const relPaths: string[] = [];
+          Array.from(folderFiles).forEach((f) => {
+            fd.append("files", f);
+            relPaths.push((f as any).webkitRelativePath || f.name);
+          });
+          fd.append("relative_paths", JSON.stringify(relPaths));
+          fd.append("name", projectName || "Local Folder Project");
+          fd.append("description", "Local folder uploaded via browser picker");
+          fd.append("execution_mode", runnerMode);
+          fd.append("env_content", targetEnvContent);
+          createdProject = await qcApi.uploadProjectFiles(fd);
+        } else {
+          if (!localFolderPath.trim()) {
+            throw new Error("Please enter or browse a valid local folder path.");
+          }
+          const parts = localFolderPath.replace(/\\/g, "/").split("/");
+          createdProject = await qcApi.createProject({
+            name: projectName || parts[parts.length - 1] || "Local Software Project",
+            root_path: localFolderPath.trim(),
+            description: "Local directory registered via Launch Hub",
+            execution_mode: runnerMode,
+          });
+          if (targetEnvContent.trim()) {
+            await qcApi.saveProjectEnv(createdProject.id, targetEnvContent);
+          }
         }
       } else {
         if (!gitRepoUrl.trim()) {
@@ -558,25 +596,45 @@ export const LaunchWizardPage: React.FC = () => {
         )}
 
         {intakeTab === "folder" && (
-          <div className="p-5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
+          <div className="p-5 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
             <label className="block text-slate-300 font-medium">
               Project Folder Path
             </label>
-            <div className="flex gap-2">
+            <input
+              ref={folderInputRef}
+              type="file"
+              multiple
+              {...({ webkitdirectory: "", directory: "" } as any)}
+              onChange={handleBrowserFolderChange}
+              className="hidden"
+            />
+            <div className="flex flex-wrap gap-2">
               <input
                 type="text"
                 value={localFolderPath}
-                onChange={(e) => setLocalFolderPath(e.target.value)}
+                onChange={(e) => {
+                  setFolderFiles(null);
+                  setLocalFolderPath(e.target.value);
+                }}
                 placeholder="Click Browse or paste C:\path\to\project"
-                className="flex-1 px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 font-mono"
+                className="flex-1 min-w-[220px] px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 font-mono"
               />
               <button
                 type="button"
+                disabled={browsingFolder}
                 onClick={handlePickNativeFolder}
-                className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 font-semibold text-white flex items-center gap-1.5 shrink-0"
+                className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 font-semibold text-white flex items-center gap-1.5 shrink-0"
               >
                 <FolderOpen className="w-4 h-4" />
-                <span>Browse...</span>
+                <span>{browsingFolder ? "Opening..." : "Browse..."}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => folderInputRef.current?.click()}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5 shrink-0"
+              >
+                <UploadCloud className="w-4 h-4 text-sky-400" />
+                <span>Pick in Browser</span>
               </button>
             </div>
           </div>

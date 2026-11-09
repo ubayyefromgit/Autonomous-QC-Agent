@@ -3,6 +3,7 @@
 import asyncio
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -572,9 +573,59 @@ async def update_runtime_configuration(
 async def pick_local_folder(
     _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Open a native Windows folder browser dialog on the host machine and return the selected path."""
+    """Open a native OS folder browser dialog on the host machine and return the selected path."""
 
     def _open_dialog() -> str:
+        # 1. Native Windows FolderBrowserDialog via PowerShell STA (works inside .exe without tkinter, always TopMost)
+        if sys.platform == "win32":
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$owner = New-Object System.Windows.Forms.Form; "
+                "$owner.TopMost = $true; "
+                "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$dlg.Description = 'Select Target Software Project Folder for QC Audit'; "
+                "$dlg.ShowNewFolderButton = $false; "
+                "if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { "
+                "  Write-Output $dlg.SelectedPath "
+                "}"
+            )
+            try:
+                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    creationflags=creation_flags,
+                )
+                out = (proc.stdout or "").strip()
+                if out:
+                    return out.splitlines()[-1].strip()
+                if proc.returncode == 0:
+                    return ""
+            except Exception:
+                pass
+
+        # 2. Native macOS folder picker fallback
+        if sys.platform == "darwin":
+            try:
+                proc = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'POSIX path of (choose folder with prompt "Select Target Software Project Folder for QC Audit")',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                out = (proc.stdout or "").strip()
+                if out:
+                    return out
+            except Exception:
+                pass
+
+        # 3. Cross-platform tkinter fallback
         try:
             import tkinter as tk
             from tkinter import filedialog

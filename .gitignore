@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Local PostgreSQL cluster & runtime artifact storage
+.postgres_data/
+.qc_storage/
+.qc_workspaces/
+*.db
+*.sqlite3
+
+# Frontend
+node_modules/
+frontend/.vite/
+
+# PyInstaller intermediate build artifacts (root QC_Intelligence_Platform.exe is tracked)
+build/
+/dist/
+*.spec
+
+# Testing & Coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+playwright-report/
+test-results/
+
+# Secrets
+.env
+.env.local
+

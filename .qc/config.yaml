@@ -1,0 +1,55 @@
+project:
+  name: "qc-intelligence-platform"
+  default_branch: "main"
+
+execution:
+  mode: "LOCAL"
+  timeout_seconds: 120
+  docker:
+    image: "python:3.11-slim"
+    cpus: "1.0"
+    memory: "1024m"
+    network: "none"
+
+exclusions:
+  - ".git"
+  - "node_modules"
+  - ".venv"
+  - ".postgres_data"
+  - ".qc_storage"
+  - ".qc_workspaces"
+  - "frontend/dist"
+
+custom_rules:
+  max_cyclomatic_complexity: 18
+  forbid_bare_except: true
+  forbid_mutable_defaults: true
+  skip_nested_pytest: true
+
+services:
+  backend:
+    command: ["python", "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "{port}"]
+    health_path: "/api/v1/system/health"
+  frontend:
+    command: ["npm", "run", "dev", "--", "--port", "{port}"]
+    working_dir: "frontend"
+
+test_credentials:
+  env_reference: ".env.qc"
+  use_synthetic_credentials: true
+
+quality_gate:
+  max_critical_findings: 0
+  max_high_findings_for_clean_approval: 0
+  min_approval_score: 60.0
+  min_inspection_coverage_percent: 80.0
+
+reporting:
+  default_format: "HTML"
+  output_dir: ".qc_storage/reports"
+
+platform_sync:
+  enabled: false
+  api_base_url: "http://127.0.0.1:8000/api/v1"
+  transmit_source_or_evidence: false
+

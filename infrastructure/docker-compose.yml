@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: qc-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: qc_platform
+    ports:
+      - "5433:5432"
+    volumes:
+      - qc_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d qc_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: qc-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ..
+      dockerfile: execution/docker/Dockerfile.sandbox
+    container_name: qc-backend
+    command: uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      QC_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/qc_platform
+      QC_SYNC_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/qc_platform
+      QC_REDIS_URL: redis://redis:6379/0
+      QC_DEFAULT_EXECUTION_MODE: LOCAL
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  qc_postgres_data:
+

@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+# Non-root execution sandbox for Mode A / Mode B DockerProjectRunner
+RUN groupadd -r qcsandbox && useradd -r -g qcsandbox -m -d /workspace qcsandbox
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    pytest \
+    httpx \
+    ruff \
+    mypy \
+    bandit
+
+WORKDIR /workspace
+USER qcsandbox
+
+CMD ["python", "--version"]
+

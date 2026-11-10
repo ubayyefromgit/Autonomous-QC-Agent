@@ -85,27 +85,31 @@ def _select_available_port(host: str, preferred_port: int) -> tuple[int, bool]:
 
 
 def _ensure_postgres_or_sqlite(app_root: Path) -> None:
-    if _is_port_open("127.0.0.1", 5433):
-        print("[QC Launcher] Database Mode: Local PostgreSQL 18 active on 127.0.0.1:5433.")
+    if _is_port_open("127.0.0.1", 5432) or _is_port_open("127.0.0.1", 5433):
+        active_port = 5432 if _is_port_open("127.0.0.1", 5432) else 5433
+        print(f"[QC Launcher] Database Mode: Host PostgreSQL active on 127.0.0.1:{active_port}.")
         return
 
-    pg_exe = Path(r"C:\Program Files\PostgreSQL\18\bin\postgres.exe")
-    pg_data = app_root / ".postgres_data"
-    if pg_exe.exists() and pg_data.exists():
-        print("[QC Launcher] Starting local PostgreSQL 18 cluster on port 5433...")
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        subprocess.Popen(
-            [str(pg_exe), "-D", str(pg_data), "-p", "5433"],
-            cwd=str(app_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creation_flags,
-        )
-        for _ in range(20):
-            if _is_port_open("127.0.0.1", 5433):
-                print("[QC Launcher] PostgreSQL 18 started and accepting connections.")
-                return
-            time.sleep(0.35)
+    # Check for installed PostgreSQL versions on Windows
+    for pg_ver in ["18", "17", "16", "15", "14"]:
+        pg_exe = Path(rf"C:\Program Files\PostgreSQL\{pg_ver}\bin\postgres.exe")
+        pg_data = app_root / ".postgres_data"
+        if pg_exe.exists() and pg_data.exists():
+            print(f"[QC Launcher] Starting local PostgreSQL {pg_ver} cluster on port 5433...")
+            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                [str(pg_exe), "-D", str(pg_data), "-p", "5433"],
+                cwd=str(app_root),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+            )
+            for _ in range(20):
+                if _is_port_open("127.0.0.1", 5433):
+                    print(f"[QC Launcher] PostgreSQL {pg_ver} started and accepting connections.")
+                    return
+                time.sleep(0.35)
+            break
 
     print(
         "[QC Launcher] Database Mode: Universal Zero-Config Embedded SQLite (no external DB installation needed)."

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -46,8 +47,8 @@ function computeRunDuration(started?: string | null, completed?: string | null):
 export const LaunchWizardPage: React.FC = () => {
   const navigate = useNavigate();
 
-  // Collapsible drawers for minimal UI
-  const [showInstructions, setShowInstructions] = useState(false);
+  // Always keep instructions visible by default
+  const [showInstructions, setShowInstructions] = useState(true);
   const [showApiKeys, setShowApiKeys] = useState(false);
   const [showEnvEditor, setShowEnvEditor] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
@@ -102,11 +103,79 @@ export const LaunchWizardPage: React.FC = () => {
   const [readinessData, setReadinessData] = useState<Record<string, any> | null>(null);
   const [editableProjectEnv, setEditableProjectEnv] = useState<string>("");
 
+  // Running Audit Polling State (persists across page navigation)
+  const [runningAudit, setRunningAudit] = useState<AuditSession | null>(null);
+  const pollingRef = useRef<any>(null);
+
+  // Prerequisites Blocker State (displays exact errors & fixes)
+  const [prereqBlocker, setPrereqBlocker] = useState<{
+    projectId: string;
+    projectName: string;
+    issues: { error: string; fix: string }[];
+  } | null>(null);
+
   const [busy, setBusy] = useState(false);
   const [statusBanner, setStatusBanner] = useState<{
     type: "success" | "error" | "info";
     text: string;
   } | null>(null);
+
+  const startPollingAudit = (auditId: string) => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    setBusy(true);
+
+    const checkStatus = async () => {
+      try {
+        const current = await qcApi.getAudit(auditId);
+        setRunningAudit(current);
+
+        const isRunning = [
+          "CREATED",
+          "DISCOVERING",
+          "PLANNING",
+          "EXECUTING",
+          "VALIDATING",
+          "SCORING",
+          "REPORTING",
+        ].includes(current.status);
+
+        if (!isRunning) {
+          if (pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+          }
+          setBusy(false);
+          setRunningAudit(null);
+          await loadReadableResultForAudit(current, true);
+          const updatedAudits = await qcApi.listAudits();
+          setRecentAudits(updatedAudits);
+          setStatusBanner({
+            type: current.status === "FAILED" ? "error" : "success",
+            text:
+              current.status === "FAILED"
+                ? `Audit failed: ${current.error_summary || "Unknown error"}`
+                : `Audit completed for '${current.project_name || "Project"}' (Score: ${
+                    current.overall_score ?? "—"
+                  }/100). View your readable insights below!`,
+          });
+        }
+      } catch {
+        // network retry
+      }
+    };
+
+    checkStatus();
+    pollingRef.current = setInterval(checkStatus, 2000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+        pollingRef.current = null;
+      }
+    };
+  }, []);
 
   const fetchModelsForProvider = async (
     prov: string,
@@ -168,9 +237,36 @@ export const LaunchWizardPage: React.FC = () => {
     ]);
     setRuntimeConfig(rc);
     setRecentAudits(auditsList);
-    if (auditsList.length > 0 && !activeAuditResult) {
+
+    // Restore active running audit or latest result across page navigation
+    const savedActiveAuditId = localStorage.getItem("qc_active_audit_id");
+    if (savedActiveAuditId) {
+      try {
+        const savedAudit = await qcApi.getAudit(savedActiveAuditId);
+        const isRunning = [
+          "CREATED",
+          "DISCOVERING",
+          "PLANNING",
+          "EXECUTING",
+          "VALIDATING",
+          "SCORING",
+          "REPORTING",
+        ].includes(savedAudit.status);
+        if (isRunning) {
+          setRunningAudit(savedAudit);
+          startPollingAudit(savedAudit.id);
+        } else {
+          await loadReadableResultForAudit(savedAudit, false);
+        }
+      } catch {
+        if (auditsList.length > 0 && !activeAuditResult) {
+          await loadReadableResultForAudit(auditsList[0], false);
+        }
+      }
+    } else if (auditsList.length > 0 && !activeAuditResult) {
       await loadReadableResultForAudit(auditsList[0], false);
     }
+
     if (rc.ai_config) {
       const initialProv = rc.ai_config.default_llm_provider || "ollama";
       setLlmProvider(initialProv);
@@ -185,6 +281,51 @@ export const LaunchWizardPage: React.FC = () => {
     setProjects(projs);
     if (projs.length > 0 && !selectedReadinessProjectId) {
       setSelectedReadinessProjectId(projs[0].id);
+    }
+  };
+
+  const handleQuickProviderChange = async (newProv: string) => {
+    setLlmProvider(newProv);
+    await fetchModelsForProvider(newProv);
+    try {
+      await qcApi.updateRuntimeConfig({ default_llm_provider: newProv });
+    } catch {
+      // non-blocking
+    }
+  };
+
+  const handleQuickModelChange = async (newModel: string) => {
+    setSelectedModel(newModel);
+    try {
+      const payload: Record<string, any> = {};
+      if (llmProvider === "gemini") payload.gemini_model = newModel;
+      else if (llmProvider === "openai") payload.openai_model = newModel;
+      else payload.ollama_model = newModel;
+      await qcApi.updateRuntimeConfig(payload);
+    } catch {
+      // non-blocking
+    }
+  };
+
+  const handleSaveInlineKey = async (provider: "gemini" | "openai", key: string) => {
+    if (!key.trim()) return;
+    setBusy(true);
+    try {
+      const payload: Record<string, any> = {
+        default_llm_provider: provider,
+        [provider === "gemini" ? "gemini_api_key" : "openai_api_key"]: key.trim(),
+      };
+      const updated = await qcApi.updateRuntimeConfig(payload);
+      setRuntimeConfig(updated);
+      await fetchModelsForProvider(provider, key.trim());
+      setStatusBanner({
+        type: "success",
+        text: `Connected ${provider.toUpperCase()} API key and updated model list!`,
+      });
+    } catch (err: any) {
+      setStatusBanner({ type: "error", text: err.message });
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -334,7 +475,7 @@ export const LaunchWizardPage: React.FC = () => {
     }
   };
 
-  const handleProjectIntake = async (runAuditImmediately: boolean) => {
+  const handleProjectIntake = async (runAuditImmediately: boolean, bypassPrereqs = false) => {
     setBusy(true);
     setStatusBanner(null);
     try {
@@ -424,26 +565,72 @@ export const LaunchWizardPage: React.FC = () => {
       setProjects(updatedProjects);
       setSelectedReadinessProjectId(createdProject.id);
 
+      const rd = await qcApi.getProjectReadiness(createdProject.id);
+      setReadinessData(rd);
+      setEditableProjectEnv(rd.current_env_content || "");
+
       if (runAuditImmediately) {
+        if (!bypassPrereqs) {
+          const issues: { error: string; fix: string }[] = [];
+          if (rd.error) {
+            issues.push({
+              error: `Project directory error: ${rd.error}`,
+              fix: "Ensure project files are accessible and not locked by another process.",
+            });
+          }
+          if (rd.missing_env_keys && rd.missing_env_keys.length > 0) {
+            issues.push({
+              error: `Missing environment secrets: ${rd.missing_env_keys.join(", ")}`,
+              fix: `Add these keys in 'Optional: Add custom .env variables' below or put them in a .env file in the project folder.`,
+            });
+          }
+          if (rd.checklist && Array.isArray(rd.checklist)) {
+            for (const item of rd.checklist) {
+              if (
+                item.status === "MISSING node_modules" ||
+                item.status?.includes("NOT INSTALLED")
+              ) {
+                issues.push({
+                  error: `${item.title}: ${item.instruction}`,
+                  fix: item.command || `Run setup command for ${item.title}`,
+                });
+              }
+            }
+          }
+
+          if (issues.length > 0) {
+            setPrereqBlocker({
+              projectId: createdProject.id,
+              projectName: createdProject.name,
+              issues,
+            });
+            setBusy(false);
+            setStatusBanner({
+              type: "error",
+              text: `Audit prerequisites not met for '${createdProject.name}'. Please review the errors and fixes below.`,
+            });
+            return;
+          }
+        }
+
+        setPrereqBlocker(null);
         const audit = await qcApi.startAudit(createdProject.id, {
           audit_scope: auditScope,
           runner_mode: runnerMode,
           custom_instructions: customInstructions.trim() || undefined,
           project_documentation: projectDocumentation.trim(),
           run_immediately: true,
-          run_synchronously: true,
+          run_synchronously: false,
         });
-        const updatedAudits = await qcApi.listAudits();
-        setRecentAudits(updatedAudits);
-        await loadReadableResultForAudit(audit, true);
+
+        localStorage.setItem("qc_active_audit_id", audit.id);
+        setRunningAudit(audit);
+        startPollingAudit(audit.id);
         setStatusBanner({
-          type: "success",
-          text: `Audit completed for '${createdProject.name}' (Score: ${audit.overall_score ?? "—"}/100). View your readable insights & file coverage below!`,
+          type: "info",
+          text: `Audit initiated for '${createdProject.name}'. Analyzing code in background...`,
         });
       } else {
-        const rd = await qcApi.getProjectReadiness(createdProject.id);
-        setReadinessData(rd);
-        setEditableProjectEnv(rd.current_env_content || "");
         setShowReadiness(true);
         setStatusBanner({
           type: "success",
@@ -453,7 +640,9 @@ export const LaunchWizardPage: React.FC = () => {
     } catch (err: any) {
       setStatusBanner({ type: "error", text: err.message });
     } finally {
-      setBusy(false);
+      if (!runAuditImmediately) {
+        setBusy(false);
+      }
     }
   };
 
@@ -778,6 +967,204 @@ export const LaunchWizardPage: React.FC = () => {
           </div>
         </form>
       )}
+
+      {/* Live Running Audit Banner — Stays alive across page navigation */}
+      {runningAudit && (
+        <div className="p-5 rounded-2xl bg-sky-950/40 border border-sky-500/40 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <RefreshCw className="w-5 h-5 text-sky-400 animate-spin shrink-0" />
+              <div>
+                <div className="font-bold text-sm text-sky-200">
+                  Autonomous Audit In Progress: {runningAudit.project_name || projectName || "Target Project"}
+                </div>
+                <p className="text-slate-300 mt-0.5">
+                  Phase: <span className="font-mono font-semibold text-white px-2 py-0.5 rounded bg-sky-900/60 border border-sky-700/50">{runningAudit.current_phase || runningAudit.status}</span> · Running AST, Security, Performance &amp; Runtime Agents...
+                </p>
+              </div>
+            </div>
+            <span className="px-3 py-1 rounded-full bg-sky-500/20 text-sky-300 font-mono font-semibold text-[11px] animate-pulse">
+              LIVE RUNNING
+            </span>
+          </div>
+          <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+            <div
+              className="bg-sky-500 h-2 rounded-full transition-all duration-700"
+              style={{
+                width:
+                  runningAudit.current_phase === "DISCOVERING"
+                    ? "20%"
+                    : runningAudit.current_phase === "PLANNING"
+                    ? "40%"
+                    : runningAudit.current_phase === "EXECUTING"
+                    ? "65%"
+                    : runningAudit.current_phase === "VALIDATING"
+                    ? "80%"
+                    : runningAudit.current_phase === "SCORING" || runningAudit.current_phase === "REPORTING"
+                    ? "95%"
+                    : "50%",
+              }}
+            />
+          </div>
+          <p className="text-[11px] text-slate-400 italic">
+            💡 Feel free to navigate through other views (Findings, Fix Approvals, Projects) — your audit will continue running safely and results will display here automatically upon completion.
+          </p>
+        </div>
+      )}
+
+      {/* Prerequisites Check Blocker / Error Guidance Banner */}
+      {prereqBlocker && (
+        <div className="p-5 rounded-2xl bg-rose-950/30 border border-rose-500/40 space-y-4 text-xs">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-bold text-sm text-rose-200">
+                Audit Prerequisites Not Met for '{prereqBlocker.projectName}'
+              </div>
+              <p className="text-slate-300">
+                The target project requires the following environment configurations or packages before running a complete quality audit:
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-2.5">
+            {prereqBlocker.issues.map((iss, idx) => (
+              <div
+                key={idx}
+                className="p-3 rounded-xl bg-slate-950/80 border border-rose-500/20 space-y-1.5"
+              >
+                <div className="font-semibold text-rose-300 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                  <span>Error: {iss.error}</span>
+                </div>
+                <div className="text-slate-300 flex items-start gap-2 pt-0.5">
+                  <Terminal className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
+                  <span className="font-mono text-[11px] text-sky-200 select-all">
+                    Fix: {iss.fix}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-rose-500/20">
+            <button
+              type="button"
+              onClick={() => {
+                setShowEnvEditor(true);
+                setShowReadiness(true);
+              }}
+              className="px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-semibold"
+            >
+              Open .env Variable Editor &amp; Setup Advisor
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPrereqBlocker(null)}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-400"
+              >
+                Dismiss
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => handleProjectIntake(true, true)}
+                className="px-4 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 font-semibold text-white flex items-center gap-1.5"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>Run Audit Anyway (Skip Prerequisites)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Always-Visible AI Engine & Model Selector Bar */}
+      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 font-semibold text-slate-200">
+            <Sparkles className="w-4 h-4 text-sky-400" />
+            <span>AI Provider:</span>
+          </div>
+          <select
+            value={llmProvider}
+            onChange={(e) => handleQuickProviderChange(e.target.value)}
+            className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-medium"
+          >
+            <option value="ollama">Local / Ollama (Free, Deterministic)</option>
+            <option value="gemini">Google Gemini (Cloud AI)</option>
+            <option value="openai">OpenAI (Cloud AI)</option>
+          </select>
+
+          <div className="flex items-center gap-2 font-semibold text-slate-200 ml-2">
+            <span>Model:</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={selectedModel}
+              onChange={(e) => handleQuickModelChange(e.target.value)}
+              className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-sky-300 font-mono font-medium max-w-[260px]"
+            >
+              {providerModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <span
+              className={`text-[10px] font-semibold ${
+                modelsSource === "live_api" ? "text-emerald-400" : "text-slate-400"
+              }`}
+            >
+              {modelsSource === "live_api" ? "✓ Live API" : "Catalog"}
+            </span>
+          </div>
+        </div>
+
+        {/* Inline API Key input if selected provider has no saved key */}
+        {llmProvider === "gemini" && !aiCfg.has_gemini_key && (
+          <div className="flex items-center gap-2">
+            <span className="text-amber-400 font-medium">Gemini Key:</span>
+            <input
+              type="password"
+              value={geminiKey}
+              onChange={(e) => setGeminiKey(e.target.value)}
+              placeholder="Enter AIzaSy..."
+              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-36"
+            />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => handleSaveInlineKey("gemini", geminiKey)}
+              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 font-semibold text-white"
+            >
+              Save Key
+            </button>
+          </div>
+        )}
+
+        {llmProvider === "openai" && !aiCfg.has_openai_key && (
+          <div className="flex items-center gap-2">
+            <span className="text-amber-400 font-medium">OpenAI Key:</span>
+            <input
+              type="password"
+              value={openaiKey}
+              onChange={(e) => setOpenaiKey(e.target.value)}
+              placeholder="Enter sk-..."
+              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-36"
+            />
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => handleSaveInlineKey("openai", openaiKey)}
+              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 font-semibold text-white"
+            >
+              Save Key
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Main Minimal Card: Project Source Intake */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5 text-xs">

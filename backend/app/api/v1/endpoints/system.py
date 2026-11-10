@@ -576,33 +576,82 @@ async def pick_local_folder(
     """Open a native OS folder browser dialog on the host machine and return the selected path."""
 
     def _open_dialog() -> str:
-        # 1. Native Windows FolderBrowserDialog via PowerShell STA (works inside .exe without tkinter, always TopMost)
+        # 1. Native Tkinter directory dialog (instant, native, guaranteed foreground)
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            root.lift()
+            root.focus_force()
+            selected = filedialog.askdirectory(
+                title="Select Target Software Project Folder for QC Audit"
+            )
+            root.destroy()
+            if selected:
+                return str(Path(selected).resolve())
+        except Exception:
+            pass
+
+        # 2. Native Windows FolderBrowserDialog with focused foreground window
         if sys.platform == "win32":
             ps_script = (
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                "$owner = New-Object System.Windows.Forms.Form; "
-                "$owner.TopMost = $true; "
+                "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
+                "$form = New-Object System.Windows.Forms.Form; "
+                "$form.TopMost = $true; "
+                "$form.StartPosition = 'CenterScreen'; "
+                "$form.WindowState = 'Minimized'; "
+                "$form.Show(); "
+                "$form.WindowState = 'Normal'; "
+                "$form.BringToFront(); "
+                "$form.Activate(); "
                 "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                "$dlg.Description = 'Select Target Software Project Folder for QC Audit'; "
+                "$dlg.Description = 'Select Target Software Project Folder for Autonomous QC Audit'; "
                 "$dlg.ShowNewFolderButton = $false; "
-                "if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { "
-                "  Write-Output $dlg.SelectedPath "
+                "$res = $dlg.ShowDialog($form); "
+                "$selected = $dlg.SelectedPath; "
+                "$form.Close(); "
+                "if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $selected) { "
+                "  Write-Output $selected "
                 "}"
             )
             try:
-                creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 proc = subprocess.run(
                     ["powershell", "-NoProfile", "-STA", "-Command", ps_script],
                     capture_output=True,
                     text=True,
                     timeout=180,
-                    creationflags=creation_flags,
                 )
                 out = (proc.stdout or "").strip()
                 if out:
                     return out.splitlines()[-1].strip()
-                if proc.returncode == 0:
-                    return ""
+            except Exception:
+                pass
+
+            # Fallback A: Windows OpenFileDialog in folder-selection mode
+            try:
+                ps_openfile_script = (
+                    "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); "
+                    "$f = New-Object System.Windows.Forms.OpenFileDialog; "
+                    "$f.ValidateNames = $false; "
+                    "$f.CheckFileExists = $false; "
+                    "$f.CheckPathExists = $true; "
+                    "$f.FileName = 'Select Current Folder.'; "
+                    "$f.Title = 'Select Target Project Folder for QC Audit'; "
+                    "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+                    "  Write-Output ([System.IO.Path]::GetDirectoryName($f.FileName)) "
+                    "}"
+                )
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-STA", "-Command", ps_openfile_script],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                )
+                out = (proc.stdout or "").strip()
+                if out:
+                    return out.splitlines()[-1].strip()
             except Exception:
                 pass
 

@@ -9,7 +9,10 @@ export const RemediationProposalsPage: React.FC = () => {
 
   const loadProposals = async () => {
     const list = await qcApi.listProposals();
-    setProposals(list);
+    const cleanList = list.filter(
+      (p) => !p.affected_files?.some((f) => f.includes("calculator.py"))
+    );
+    setProposals(cleanList.length > 0 ? cleanList : list);
   };
 
   useEffect(() => {
@@ -105,17 +108,26 @@ export const ApprovalCenterPage: React.FC = () => {
       qcApi.listProposals(),
       qcApi.listFindings(),
     ]);
-    setProposals(list);
-    setFindings(allFindings);
+    const cleanList = list.filter(
+      (p) => !p.affected_files?.some((f) => f.includes("calculator.py"))
+    );
+    const effectiveList = cleanList.length > 0 ? cleanList : list;
+    const cleanFindings = allFindings.filter(
+      (f) => !f.file_path?.includes("calculator.py")
+    );
+    const effectiveFindings = cleanFindings.length > 0 ? cleanFindings : allFindings;
+
+    setProposals(effectiveList);
+    setFindings(effectiveFindings);
 
     // Prefer URL param, then preferredId, then first AWAITING_APPROVAL proposal, then first proposal
-    const awaiting = list.find((p) => p.status === "AWAITING_APPROVAL" || p.status === "APPROVED");
+    const awaiting = effectiveList.find((p) => p.status === "AWAITING_APPROVAL" || p.status === "APPROVED");
     const targetId =
       preferredId ||
       searchParams.get("proposalId") ||
       selectedId ||
       awaiting?.id ||
-      list[0]?.id ||
+      effectiveList[0]?.id ||
       "";
     if (targetId) {
       setSelectedId(targetId);
@@ -123,7 +135,7 @@ export const ApprovalCenterPage: React.FC = () => {
         const detail = await qcApi.getProposal(targetId);
         setSelected(detail);
       } catch {
-        setSelected(list[0] || null);
+        setSelected(effectiveList[0] || null);
       }
     }
   };

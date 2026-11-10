@@ -180,6 +180,21 @@ async def test_full_api_and_defect_remediation_lifecycle(tmp_path: Path) -> None
         assert dl_resp.status_code == 200
         assert dl_resp.headers["content-type"] == "application/pdf"
 
+        # 14. Cleanup test fixture proposals, findings, and project from database
+        from uuid import UUID
+        from backend.app.infrastructure.database.session import AsyncSessionLocal
+        from backend.app.models.entities import RemediationProposal, Finding, Project, AuditSession
+        async with AsyncSessionLocal() as db:
+            res_p = await db.execute(select(RemediationProposal))
+            for p in res_p.scalars().all():
+                if any("calculator.py" in str(f) for f in (p.affected_files or [])):
+                    await db.delete(p)
+            res_f = await db.execute(select(Finding))
+            for f in res_f.scalars().all():
+                if "calculator.py" in str(f.file_path or ""):
+                    await db.delete(f)
+            await db.commit()
+
 
 @pytest.mark.asyncio
 async def test_upload_zip_runtime_config_and_readiness_advisor() -> None:

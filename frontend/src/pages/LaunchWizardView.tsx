@@ -47,9 +47,6 @@ function computeRunDuration(started?: string | null, completed?: string | null):
 export const LaunchWizardPage: React.FC = () => {
   const navigate = useNavigate();
 
-  // Always keep instructions visible by default
-  const [showInstructions, setShowInstructions] = useState(true);
-  const [showApiKeys, setShowApiKeys] = useState(false);
   const [showEnvEditor, setShowEnvEditor] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
 
@@ -340,43 +337,6 @@ export const LaunchWizardPage: React.FC = () => {
       setEditableProjectEnv(rd.current_env_content || "");
     });
   }, [selectedReadinessProjectId]);
-
-  const handleSaveApiKeys = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setStatusBanner(null);
-    try {
-      const payload: Record<string, any> = {
-        default_llm_provider: llmProvider,
-        ollama_base_url: ollamaUrl,
-        gemini_api_key: geminiKey || undefined,
-        openai_api_key: openaiKey || undefined,
-        github_token: githubToken || undefined,
-        default_runner_mode: runnerMode,
-      };
-      if (llmProvider === "gemini") {
-        payload.gemini_model = selectedModel;
-      } else if (llmProvider === "openai") {
-        payload.openai_model = selectedModel;
-      } else {
-        payload.ollama_model = selectedModel;
-      }
-      const updated = await qcApi.updateRuntimeConfig(payload);
-      setRuntimeConfig(updated);
-      setGeminiKey("");
-      setOpenaiKey("");
-      setGithubToken("");
-      setStatusBanner({
-        type: "success",
-        text: `AI Provider (${llmProvider.toUpperCase()}) and Model (${selectedModel}) saved.`,
-      });
-      setShowApiKeys(false);
-    } catch (err: any) {
-      setStatusBanner({ type: "error", text: err.message });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const handlePickNativeFolder = async () => {
     setBrowsingFolder(true);
@@ -671,50 +631,14 @@ export const LaunchWizardPage: React.FC = () => {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
-      {/* Minimal Header + Quick Action Pills */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-bold text-slate-100">
-            New Project Audit
-          </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Upload your code, verify optional API keys or setup instructions, and launch an autonomous QC audit.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button
-            type="button"
-            onClick={() => setShowInstructions((v) => !v)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-medium"
-          >
-            <HelpCircle className="w-3.5 h-3.5 text-sky-400" />
-            <span>
-              Instructions &amp; Tools ({installedCount}/{tools.length})
-            </span>
-            {showInstructions ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowApiKeys((v) => !v)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-medium"
-          >
-            <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-            <span>
-              AI: {llmProvider.toUpperCase()} ({selectedModel})
-            </span>
-            {showApiKeys ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
-            )}
-          </button>
-        </div>
+      {/* Header */}
+      <div>
+        <h2 className="text-xl font-bold text-slate-100">
+          New Project Audit
+        </h2>
+        <p className="text-xs text-slate-400 mt-0.5">
+          Upload your code, verify optional API keys or setup instructions, and launch an autonomous QC audit.
+        </p>
       </div>
 
       {statusBanner && (
@@ -731,199 +655,85 @@ export const LaunchWizardPage: React.FC = () => {
         </div>
       )}
 
-      {/* Collapsible Drawer 1: Instructions & System Tools */}
-      {showInstructions && (
-        <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4 text-xs">
-          <div className="font-bold text-sm text-slate-100">
-            How to Run an Audit &amp; What Needs Manual Setup
+      {/* Instructions & System Tools (Always Visible) */}
+      <div className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4 text-xs">
+        <div className="font-bold text-sm text-slate-100">
+          How to Run an Audit &amp; What Needs Manual Setup
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {steps.map((s: any) => (
+            <div
+              key={s.step}
+              className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-1"
+            >
+              <div className="font-semibold text-sky-400">{s.title}</div>
+              <p className="text-slate-300">{s.summary}</p>
+              <p className="text-[11px] text-amber-400 pt-1">
+                <strong>Manual Setup:</strong> {s.manual_action_required}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div className="pt-2">
+          <div className="font-semibold text-slate-200 mb-2">
+            System Tools Status
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {steps.map((s: any) => (
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {tools.map((t: any) => (
               <div
-                key={s.step}
-                className="p-3 rounded-lg bg-slate-950 border border-slate-800 space-y-1"
+                key={t.name}
+                className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex flex-col justify-between"
+                title={t.installed ? t.version : `Install: ${t.install_command}`}
               >
-                <div className="font-semibold text-sky-400">{s.title}</div>
-                <p className="text-slate-300">{s.summary}</p>
-                <p className="text-[11px] text-amber-400 pt-1">
-                  <strong>Manual Setup:</strong> {s.manual_action_required}
-                </p>
+                <div className="flex items-center justify-between">
+                  <span className="font-mono font-semibold text-slate-200">
+                    {t.name}
+                  </span>
+                  <span
+                    className={
+                      t.installed ? "text-emerald-400" : "text-amber-400"
+                    }
+                  >
+                    {t.installed ? "✓" : "!"}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1 truncate">
+                  {t.installed ? "Installed" : t.install_command}
+                </div>
               </div>
             ))}
           </div>
-
-          <div className="pt-2">
-            <div className="font-semibold text-slate-200 mb-2">
-              System Tools Status
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-              {tools.map((t: any) => (
-                <div
-                  key={t.name}
-                  className="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex flex-col justify-between"
-                  title={t.installed ? t.version : `Install: ${t.install_command}`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono font-semibold text-slate-200">
-                      {t.name}
-                    </span>
-                    <span
-                      className={
-                        t.installed ? "text-emerald-400" : "text-amber-400"
-                      }
-                    >
-                      {t.installed ? "✓" : "!"}
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-1 truncate">
-                    {t.installed ? "Installed" : t.install_command}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
-      )}
+      </div>
 
-      {/* Collapsible Drawer 2: API Keys & AI Provider */}
-      {showApiKeys && (
-        <form
-          onSubmit={handleSaveApiKeys}
-          className="p-5 rounded-xl bg-slate-900 border border-slate-800 space-y-4 text-xs"
-        >
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="font-bold text-sm text-slate-100">
-                AI Provider &amp; Optional API Keys
-              </div>
-              <p className="text-slate-400">
-                Local mode requires no API keys. Select Gemini or OpenAI only if you want cloud LLM analysis.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-slate-400 mb-1">AI Provider</label>
-              <select
-                value={llmProvider}
-                onChange={(e) => {
-                  const nextProv = e.target.value;
-                  setLlmProvider(nextProv);
-                  fetchModelsForProvider(nextProv);
-                }}
-                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700"
-              >
-                <option value="ollama">Local / Deterministic (Free, No Key)</option>
-                <option value="gemini">Google Gemini (Requires Key)</option>
-                <option value="openai">OpenAI (Requires Key)</option>
-              </select>
+      {/* AI Model & Engine Selection Bar — Always Visible directly below Instructions */}
+      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 font-bold text-slate-100">
+              <Sparkles className="w-4 h-4 text-sky-400" />
+              <span>Configuring AI Model:</span>
             </div>
 
-            {llmProvider === "ollama" && (
-              <div>
-                <label className="block text-slate-400 mb-1">
-                  Local Ollama URL (Optional)
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={ollamaUrl}
-                    onChange={(e) => setOllamaUrl(e.target.value)}
-                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                  />
-                  <button
-                    type="button"
-                    disabled={fetchingModels}
-                    onClick={() => fetchModelsForProvider("ollama", undefined, ollamaUrl)}
-                    className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 font-semibold text-slate-200 flex items-center gap-1.5 shrink-0"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
-                    <span>Fetch Models</span>
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* Provider Dropdown */}
+            <select
+              value={llmProvider}
+              onChange={(e) => handleQuickProviderChange(e.target.value)}
+              className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-medium"
+            >
+              <option value="ollama">Local / Ollama (Free, Deterministic)</option>
+              <option value="gemini">Google Gemini (Cloud AI)</option>
+              <option value="openai">OpenAI (Cloud AI)</option>
+            </select>
 
-            {llmProvider === "gemini" && (
-              <div>
-                <label className="block text-slate-400 mb-1">
-                  Google Gemini API Key
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    value={geminiKey}
-                    onChange={(e) => setGeminiKey(e.target.value)}
-                    placeholder={
-                      aiCfg.has_gemini_key
-                        ? `Saved (${aiCfg.gemini_key_masked})`
-                        : "Enter AIzaSy..."
-                    }
-                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                  />
-                  <button
-                    type="button"
-                    disabled={fetchingModels}
-                    onClick={() => fetchModelsForProvider("gemini", geminiKey)}
-                    className="px-3 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300 flex items-center gap-1.5 shrink-0"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
-                    <span>Fetch Models</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {llmProvider === "openai" && (
-              <div>
-                <label className="block text-slate-400 mb-1">
-                  OpenAI API Key
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    value={openaiKey}
-                    onChange={(e) => setOpenaiKey(e.target.value)}
-                    placeholder={
-                      aiCfg.has_openai_key
-                        ? `Saved (${aiCfg.openai_key_masked})`
-                        : "Enter sk-..."
-                    }
-                    className="flex-1 px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-                  />
-                  <button
-                    type="button"
-                    disabled={fetchingModels}
-                    onClick={() => fetchModelsForProvider("openai", openaiKey)}
-                    className="px-3 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 font-semibold text-sky-300 flex items-center gap-1.5 shrink-0"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${fetchingModels ? "animate-spin" : ""}`} />
-                    <span>Fetch Models</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-slate-400">
-                  Select Model ({llmProvider.toUpperCase()})
-                </label>
-                <span
-                  className={`text-[10px] font-semibold ${
-                    modelsSource === "live_api" ? "text-emerald-400" : "text-slate-400"
-                  }`}
-                >
-                  {modelsSource === "live_api"
-                    ? `✓ Live API (${providerModels.length} available)`
-                    : `Default List (${providerModels.length})`}
-                </span>
-              </div>
+            {/* Model Dropdown */}
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400 font-medium">Model:</span>
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
+                onChange={(e) => handleQuickModelChange(e.target.value)}
+                className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-sky-300 font-mono font-medium max-w-[280px]"
               >
                 {providerModels.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -931,42 +741,106 @@ export const LaunchWizardPage: React.FC = () => {
                   </option>
                 ))}
               </select>
-              {modelsError && (
-                <div className="text-[11px] text-amber-400 mt-1">
-                  {modelsError}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-slate-400 mb-1">
-                GitHub Token (Private Repos Only)
-              </label>
-              <input
-                type="password"
-                value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
-                placeholder={
-                  aiCfg.has_github_token
-                    ? `Saved (${aiCfg.github_token_masked})`
-                    : "Optional (ghp_...)"
-                }
-                className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono"
-              />
+              <span
+                className={`text-[10px] font-semibold ${
+                  modelsSource === "live_api" ? "text-emerald-400" : "text-slate-400"
+                }`}
+              >
+                {modelsSource === "live_api" ? "✓ Live API" : "Catalog"}
+              </span>
             </div>
           </div>
 
-          <div className="flex justify-end">
+          {/* Quick Refresh Models Button */}
+          <button
+            type="button"
+            disabled={fetchingModels}
+            onClick={() => fetchModelsForProvider(llmProvider)}
+            className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 font-medium flex items-center gap-1.5 shrink-0"
+          >
+            <RefreshCw className={`w-3 h-3 ${fetchingModels ? "animate-spin text-sky-400" : ""}`} />
+            <span>Refresh Models</span>
+          </button>
+        </div>
+
+        {/* Inline API Key / URL Configuration if required */}
+        {llmProvider === "gemini" && (
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
+            <span className="text-slate-400 font-medium">Google Gemini API Key:</span>
+            <input
+              type="password"
+              value={geminiKey}
+              onChange={(e) => setGeminiKey(e.target.value)}
+              placeholder={
+                aiCfg.has_gemini_key
+                  ? `Saved (${aiCfg.gemini_key_masked})`
+                  : "Enter AIzaSy..."
+              }
+              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-56 text-slate-100"
+            />
             <button
-              type="submit"
-              disabled={busy}
-              className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 font-semibold text-white"
+              type="button"
+              disabled={busy || !geminiKey.trim()}
+              onClick={() => handleSaveInlineKey("gemini", geminiKey)}
+              className="px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-50 font-semibold text-white text-xs"
             >
-              Save Settings
+              Save Key
             </button>
+            {aiCfg.has_gemini_key && (
+              <span className="text-emerald-400 font-semibold ml-1">✓ Active</span>
+            )}
           </div>
-        </form>
-      )}
+        )}
+
+        {llmProvider === "openai" && (
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
+            <span className="text-slate-400 font-medium">OpenAI API Key:</span>
+            <input
+              type="password"
+              value={openaiKey}
+              onChange={(e) => setOpenaiKey(e.target.value)}
+              placeholder={
+                aiCfg.has_openai_key
+                  ? `Saved (${aiCfg.openai_key_masked})`
+                  : "Enter sk-..."
+              }
+              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-56 text-slate-100"
+            />
+            <button
+              type="button"
+              disabled={busy || !openaiKey.trim()}
+              onClick={() => handleSaveInlineKey("openai", openaiKey)}
+              className="px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-50 font-semibold text-white text-xs"
+            >
+              Save Key
+            </button>
+            {aiCfg.has_openai_key && (
+              <span className="text-emerald-400 font-semibold ml-1">✓ Active</span>
+            )}
+          </div>
+        )}
+
+        {llmProvider === "ollama" && (
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
+            <span className="text-slate-400 font-medium">Local Ollama URL:</span>
+            <input
+              type="text"
+              value={ollamaUrl}
+              onChange={(e) => setOllamaUrl(e.target.value)}
+              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-56 text-slate-100"
+            />
+            <span className="text-slate-500 text-[10px]">
+              (Free, deterministic local execution)
+            </span>
+          </div>
+        )}
+
+        {modelsError && (
+          <div className="text-[11px] text-amber-400 font-medium pt-1">
+            {modelsError}
+          </div>
+        )}
+      </div>
 
       {/* Live Running Audit Banner — Stays alive across page navigation */}
       {runningAudit && (
@@ -1079,92 +953,6 @@ export const LaunchWizardPage: React.FC = () => {
           </div>
         </div>
       )}
-
-      {/* Always-Visible AI Engine & Model Selector Bar */}
-      <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2 font-semibold text-slate-200">
-            <Sparkles className="w-4 h-4 text-sky-400" />
-            <span>AI Provider:</span>
-          </div>
-          <select
-            value={llmProvider}
-            onChange={(e) => handleQuickProviderChange(e.target.value)}
-            className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 font-medium"
-          >
-            <option value="ollama">Local / Ollama (Free, Deterministic)</option>
-            <option value="gemini">Google Gemini (Cloud AI)</option>
-            <option value="openai">OpenAI (Cloud AI)</option>
-          </select>
-
-          <div className="flex items-center gap-2 font-semibold text-slate-200 ml-2">
-            <span>Model:</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedModel}
-              onChange={(e) => handleQuickModelChange(e.target.value)}
-              className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-sky-300 font-mono font-medium max-w-[260px]"
-            >
-              {providerModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <span
-              className={`text-[10px] font-semibold ${
-                modelsSource === "live_api" ? "text-emerald-400" : "text-slate-400"
-              }`}
-            >
-              {modelsSource === "live_api" ? "✓ Live API" : "Catalog"}
-            </span>
-          </div>
-        </div>
-
-        {/* Inline API Key input if selected provider has no saved key */}
-        {llmProvider === "gemini" && !aiCfg.has_gemini_key && (
-          <div className="flex items-center gap-2">
-            <span className="text-amber-400 font-medium">Gemini Key:</span>
-            <input
-              type="password"
-              value={geminiKey}
-              onChange={(e) => setGeminiKey(e.target.value)}
-              placeholder="Enter AIzaSy..."
-              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-36"
-            />
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => handleSaveInlineKey("gemini", geminiKey)}
-              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 font-semibold text-white"
-            >
-              Save Key
-            </button>
-          </div>
-        )}
-
-        {llmProvider === "openai" && !aiCfg.has_openai_key && (
-          <div className="flex items-center gap-2">
-            <span className="text-amber-400 font-medium">OpenAI Key:</span>
-            <input
-              type="password"
-              value={openaiKey}
-              onChange={(e) => setOpenaiKey(e.target.value)}
-              placeholder="Enter sk-..."
-              className="px-2.5 py-1 rounded bg-slate-950 border border-slate-700 font-mono text-xs w-36"
-            />
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => handleSaveInlineKey("openai", openaiKey)}
-              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 font-semibold text-white"
-            >
-              Save Key
-            </button>
-          </div>
-        )}
-      </div>
 
       {/* Main Minimal Card: Project Source Intake */}
       <div className="p-6 rounded-2xl bg-slate-900 border border-slate-800 space-y-5 text-xs">

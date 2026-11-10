@@ -1,6 +1,7 @@
 """System Health, Overview Telemetry, Agents & Executors REST API endpoints (/api/v1/system)."""
 
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -176,6 +177,10 @@ async def get_system_health(
     except Exception as exc:
         db_version = f"Error: {exc}"
 
+    from backend.app.infrastructure.database.session import get_host_postgres_status
+
+    pg_status = get_host_postgres_status()
+
     return {
         "status": "HEALTHY" if db_ok else "DEGRADED",
         "app_name": settings.APP_NAME,
@@ -184,6 +189,9 @@ async def get_system_health(
             "connected": db_ok,
             "engine": "SQLite (Embedded)" if is_sqlite else "PostgreSQL",
             "version": db_version,
+            "host_postgres_detected": pg_status.get("detected_port") is not None,
+            "host_postgres_port": pg_status.get("detected_port"),
+            "host_postgres_authenticated": pg_status.get("authenticated", False),
         },
         "storage": {
             "storage_root": str(settings.storage_path),
@@ -340,6 +348,130 @@ def _probe_tool_version(cmd: list[str]) -> str:
         return "Installed"
 
 
+def _refresh_windows_path() -> None:
+    """Dynamically refresh os.environ['PATH'] from Windows registry and Python directories."""
+    if sys.platform != "win32":
+        return
+    paths: list[str] = []
+    try:
+        import winreg
+
+        # Machine PATH
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            ) as k:
+                val, _ = winreg.QueryValueEx(k, "Path")
+                paths.extend(val.split(";"))
+        except Exception:
+            pass
+
+        # User PATH
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as k:
+                val, _ = winreg.QueryValueEx(k, "Path")
+                paths.extend(val.split(";"))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Discover Python Scripts folders
+    username = os.environ.get("USERNAME", "")
+    python_bases = [
+        Path(rf"C:\Users\{username}\AppData\Local\Programs\Python"),
+        Path(rf"C:\Users\{username}\AppData\Roaming\Python"),
+        Path(r"C:\Program Files\Python*"),
+        Path(r"C:\Program Files (x86)\Python*"),
+    ]
+    for pb in python_bases:
+        if pb.exists():
+            for py_dir in pb.glob("Python3*"):
+                scripts_dir = py_dir / "Scripts"
+                if scripts_dir.exists():
+                    paths.append(str(scripts_dir))
+                paths.append(str(py_dir))
+
+    # Also current sys.executable parent & Scripts
+    if sys.executable:
+        p = Path(sys.executable).parent
+        if (p / "Scripts").exists():
+            paths.append(str(p / "Scripts"))
+        paths.append(str(p))
+
+    # Standard tool folders
+    for std_dir in [
+        r"C:\Program Files\Git\cmd",
+        r"C:\Program Files\nodejs",
+        rf"C:\Users\{username}\AppData\Roaming\npm",
+    ]:
+        if Path(std_dir).exists():
+            paths.append(std_dir)
+
+    current_entries = os.environ.get("PATH", "").split(";")
+    all_entries = list(dict.fromkeys([p.strip() for p in [*paths, *current_entries] if p.strip()]))
+    os.environ["PATH"] = ";".join(all_entries)
+
+
+def _detect_tool_presence(name: str, ver_cmd: list[str]) -> tuple[bool, str | None, str]:
+    """Detect whether a system tool is installed and probe its version reliably."""
+    _refresh_windows_path()
+
+    exe_path = shutil.which(name)
+    if exe_path:
+        version_str = _probe_tool_version(ver_cmd)
+        return True, exe_path, version_str
+
+    # Python module fallback (pytest, ruff, bandit, mypy, playwright)
+    if name in ["pytest", "ruff", "bandit", "mypy", "playwright"]:
+        for py_bin in ["python", "py", sys.executable]:
+            try:
+                res = subprocess.run(
+                    [py_bin, "-m", name, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+                if res.returncode == 0:
+                    out = (res.stdout or res.stderr or "").strip().splitlines()
+                    ver = out[0][:80] if out else "Installed"
+                    return True, f"{py_bin} -m {name}", ver
+            except Exception:
+                pass
+
+    # Node / NPM fallback
+    if name in ["node", "npm"]:
+        for cand in [
+            rf"C:\Program Files\nodejs\{name}.cmd",
+            rf"C:\Program Files\nodejs\{name}.exe",
+        ]:
+            if Path(cand).exists():
+                ver = _probe_tool_version([cand, "--version"])
+                return True, cand, ver
+
+    # Git fallback
+    if name == "git":
+        for cand in [
+            r"C:\Program Files\Git\cmd\git.exe",
+            r"C:\Program Files (x86)\Git\cmd\git.exe",
+        ]:
+            if Path(cand).exists():
+                ver = _probe_tool_version([cand, "--version"])
+                return True, cand, ver
+
+    # Python fallback
+    if name == "python":
+        for cand in ["py", "python3"]:
+            p = shutil.which(cand)
+            if p:
+                ver = _probe_tool_version([cand, "--version"])
+                return True, p, ver
+
+    return False, None, "Not Installed"
+
+
 @router.get("/runtime-config")
 async def get_runtime_configuration(
     _user: User = Depends(get_current_user),
@@ -430,9 +562,7 @@ async def get_runtime_configuration(
 
     tools_report = []
     for name, ver_cmd, requirement_level, purpose, install_cmd in tool_specs:
-        exe_path = shutil.which(name)
-        installed = exe_path is not None
-        version_str = _probe_tool_version(ver_cmd) if installed else "Not Installed"
+        installed, exe_path, version_str = _detect_tool_presence(name, ver_cmd)
         tools_report.append(
             {
                 "name": name,
@@ -567,6 +697,76 @@ async def update_runtime_configuration(
     env_path.write_text(env_body, encoding="utf-8")
 
     return await get_runtime_configuration(_user)
+
+
+class DatabaseConfigurePayload(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 5432
+    username: str = "postgres"
+    password: str = ""
+    database: str = "qc_platform"
+
+
+@router.post("/configure-database")
+async def configure_database(
+    payload: DatabaseConfigurePayload,
+    _user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from backend.app.infrastructure.database.session import (
+        Base,
+        _test_and_setup_pg,
+        reconfigure_database_engine,
+    )
+
+    ok = _test_and_setup_pg(
+        payload.host, payload.port, payload.username, payload.password
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not connect to PostgreSQL on {payload.host}:{payload.port} as '{payload.username}'. Please verify password.",
+        )
+
+    auth = (
+        f"{payload.username}:{payload.password}@"
+        if payload.password
+        else f"{payload.username}@"
+    )
+    matched_async = f"postgresql+asyncpg://{auth}{payload.host}:{payload.port}/{payload.database}"
+    matched_sync = f"postgresql+psycopg2://{auth}{payload.host}:{payload.port}/{payload.database}"
+
+    settings = get_settings()
+    settings.DATABASE_URL = matched_async
+    settings.SYNC_DATABASE_URL = matched_sync
+    reconfigure_database_engine(matched_async, matched_sync)
+
+    # Save to local .env
+    env_path = Path(".env").resolve()
+    lines: dict[str, str] = {}
+    if env_path.exists():
+        for l in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" in l and not l.strip().startswith("#"):
+                k, v = l.strip().split("=", 1)
+                lines[k.strip()] = v.strip()
+    lines["DATABASE_URL"] = matched_async
+    lines["SYNC_DATABASE_URL"] = matched_sync
+    env_path.write_text("\n".join(f"{k}={v}" for k, v in lines.items()) + "\n", encoding="utf-8")
+
+    # Ensure tables exist in PostgreSQL
+    from backend.app.infrastructure.database.session import async_engine
+
+    try:
+        async with async_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except Exception:
+        pass
+
+    return {
+        "success": True,
+        "engine": "PostgreSQL",
+        "database_url": matched_async,
+        "message": f"Successfully connected to PostgreSQL on {payload.host}:{payload.port}/{payload.database}!",
+    }
 
 
 @router.post("/pick-folder")

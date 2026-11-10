@@ -112,10 +112,32 @@ export const LaunchWizardPage: React.FC = () => {
   } | null>(null);
 
   const [busy, setBusy] = useState(false);
+  const [refreshingTools, setRefreshingTools] = useState(false);
   const [statusBanner, setStatusBanner] = useState<{
     type: "success" | "error" | "info";
     text: string;
   } | null>(null);
+
+  const handleRefreshTools = async () => {
+    setRefreshingTools(true);
+    try {
+      const rc = await qcApi.getRuntimeConfig();
+      setRuntimeConfig(rc);
+      const detected = rc.system_tools?.filter((t: any) => t.installed).length ?? 0;
+      const total = rc.system_tools?.length ?? 0;
+      setStatusBanner({
+        type: "success",
+        text: `System environment re-scanned successfully: ${detected}/${total} tools detected.`,
+      });
+    } catch (err: any) {
+      setStatusBanner({
+        type: "error",
+        text: `Failed to refresh system tools: ${err.message}`,
+      });
+    } finally {
+      setRefreshingTools(false);
+    }
+  };
 
   const startPollingAudit = (auditId: string) => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -676,8 +698,23 @@ export const LaunchWizardPage: React.FC = () => {
         </div>
 
         <div className="pt-2">
-          <div className="font-semibold text-slate-200 mb-2">
-            System Tools Status
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-200">System Tools Status</span>
+              <span className="text-[11px] text-slate-400">
+                ({installedCount}/{tools.length} detected)
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleRefreshTools}
+              disabled={refreshingTools}
+              className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-slate-800 hover:bg-slate-700 text-sky-400 hover:text-sky-300 border border-slate-700 flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              title="Re-scan system environment, Windows PATH, and Python scripts"
+            >
+              <RefreshCw className={`w-3 h-3 ${refreshingTools ? "animate-spin" : ""}`} />
+              <span>{refreshingTools ? "Scanning..." : "Refresh Tools"}</span>
+            </button>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
             {tools.map((t: any) => (
@@ -692,7 +729,7 @@ export const LaunchWizardPage: React.FC = () => {
                   </span>
                   <span
                     className={
-                      t.installed ? "text-emerald-400" : "text-amber-400"
+                      t.installed ? "text-emerald-400 font-bold" : "text-amber-400 font-bold"
                     }
                   >
                     {t.installed ? "✓" : "!"}
@@ -704,6 +741,9 @@ export const LaunchWizardPage: React.FC = () => {
               </div>
             ))}
           </div>
+          <p className="text-[11px] text-slate-400 mt-2">
+            💡 Installed a tool manually via Command Prompt / PowerShell? Click <strong className="text-sky-300">Refresh Tools</strong> to detect it immediately without restarting.
+          </p>
         </div>
       </div>
 

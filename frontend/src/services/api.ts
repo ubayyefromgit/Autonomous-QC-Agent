@@ -54,6 +54,17 @@ async function uploadMultipart<T>(path: string, formData: FormData): Promise<T> 
 export const qcApi = {
   getOverview: () => request<OverviewTelemetry>("/system/overview"),
   getHealth: () => request<Record<string, any>>("/system/health"),
+  configureDatabase: (payload: {
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    database?: string;
+  }) =>
+    request<Record<string, any>>("/system/configure-database", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   getAgents: () => request<{ agents: any[]; total_registered: number }>("/system/agents"),
   getExecutors: () => request<Record<string, any>>("/system/executors"),
   getAgentActivity: () => request<{ executions: any[]; events: any[] }>("/system/agent-activity"),

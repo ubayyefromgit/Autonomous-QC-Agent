@@ -182,6 +182,7 @@ async def test_full_api_and_defect_remediation_lifecycle(tmp_path: Path) -> None
 
         # 14. Cleanup test fixture proposals, findings, and project from database
         from uuid import UUID
+        from sqlalchemy import select
         from backend.app.infrastructure.database.session import AsyncSessionLocal
         from backend.app.models.entities import RemediationProposal, Finding, Project, AuditSession
         async with AsyncSessionLocal() as db:

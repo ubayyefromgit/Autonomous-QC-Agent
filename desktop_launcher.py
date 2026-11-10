@@ -87,7 +87,7 @@ def _select_available_port(host: str, preferred_port: int) -> tuple[int, bool]:
 def _ensure_postgres_or_sqlite(app_root: Path) -> None:
     if _is_port_open("127.0.0.1", 5432) or _is_port_open("127.0.0.1", 5433):
         active_port = 5432 if _is_port_open("127.0.0.1", 5432) else 5433
-        print(f"[QC Launcher] Database Mode: Host PostgreSQL active on 127.0.0.1:{active_port}.")
+        print(f"[QC Launcher] Database Mode: Host PostgreSQL detected on 127.0.0.1:{active_port} (Connecting or configuring via UI).")
         return
 
     # Check for installed PostgreSQL versions on Windows
